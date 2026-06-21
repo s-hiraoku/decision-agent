@@ -1,0 +1,243 @@
+# Decision Agent Specification
+
+![Decision Agent infographic](assets/decision-agent-infographic.png)
+
+## Purpose
+
+Decision Agent imitates a user's judgment criteria for tasks where the success
+condition is subjective or hard to describe up front.
+
+Goal-like automation works well for programming tasks because completion can often
+be checked with tests, builds, or explicit acceptance criteria. It works less well
+for creative or taste-driven work such as:
+
+- talk deck outlines
+- video scripts
+- technical blog outlines
+- titles, positioning, and narrative structure
+- agent-generated artifacts that need a user's personal review
+
+In these cases, an agent can produce something plausible but still different from
+what the user imagined. Decision Agent is intended to close that gap by learning
+how the user judges outputs over repeated iterations.
+
+The central responsibility is judgment, not generation.
+
+## Core Concept
+
+Decision Agent reviews an artifact and predicts how the user would respond.
+
+It should answer:
+
+- Would the user accept, revise, or reject this?
+- What feels off?
+- Which user-specific preferences does the artifact violate?
+- What concrete revision instruction should be sent back into the loop?
+- What new signal can be learned from the user's feedback?
+
+The agent is expected to improve through repeated iteration. Early accuracy may be
+low, so the system must preserve judgment differences and feedback rather than
+pretending to be correct immediately.
+
+## Target Workflow
+
+1. A human or another agent creates an artifact.
+2. Decision Agent reviews the artifact.
+3. Decision Agent returns a verdict, issues, and revision instruction.
+4. The user accepts, corrects, or overrides the judgment.
+5. The system records the difference between the agent's judgment and the user's
+   actual judgment.
+6. Decision Agent updates its preference profile.
+7. The loop repeats, improving future judgments.
+
+## Target Tasks
+
+Initial target task types:
+
+- `blog_outline`
+- `talk_outline`
+- `video_script`
+
+The design should later support other subjective artifacts without changing the
+core loop.
+
+## Data Model
+
+### Decision Record
+
+A decision record stores one review event.
+
+Required fields:
+
+- `task_type`: artifact category, such as `blog_outline`
+- `intent`: what the artifact is trying to accomplish
+- `context`: audience, goal, constraints, and surrounding information
+- `artifact`: the reviewed content
+- `agent_review`: Decision Agent's predicted judgment
+- `user_feedback`: the user's actual judgment or correction
+- `delta`: where the agent's judgment differed from the user's judgment
+- `created_at`: record timestamp
+
+### Preference Rule
+
+A preference rule captures a reusable judgment pattern.
+
+Examples:
+
+- Put a concrete pain point before abstract concept explanation.
+- Avoid generic AI-like conclusions.
+- In technical blog outlines, prefer implementation-oriented examples.
+- For talk decks, reduce audience cognitive load before increasing abstraction.
+- Reject outlines that are conceptually correct but lack a strong opening hook.
+
+Preference rules should be natural-language first. Numeric weights may be added
+later, but the first representation should remain inspectable and editable.
+
+### Negative Pattern
+
+A negative pattern captures recurring traits the user tends to dislike.
+
+Examples:
+
+- overly generic structure
+- abstract explanation before concrete problem
+- weak or delayed problem statement
+- conclusions that do not create a next action
+- polished but low-specificity language
+
+### Positive Example
+
+A positive example stores an artifact, or part of an artifact, that the user
+accepted.
+
+It should include:
+
+- why it was accepted
+- which preference rules it demonstrates
+- which task type it applies to
+
+## Review Input
+
+```json
+{
+  "task_type": "blog_outline",
+  "intent": "Decision Agent の構想を技術ブログにしたい",
+  "artifact": "評価対象の本文またはアウトライン",
+  "context": {
+    "audience": "AI agent を使っている開発者",
+    "goal": "Loop engineering に Decision Agent が必要だと伝える"
+  }
+}
+```
+
+## Review Output
+
+```json
+{
+  "verdict": "revise",
+  "confidence": 0.62,
+  "summary": "方向性は合っているが、抽象度が高く、具体的な loop の失敗例が足りない",
+  "issues": [
+    {
+      "severity": "high",
+      "reason": "読者が Decision Agent の必要性を実感する前に概念説明へ進んでいる",
+      "suggestion": "最初に、AI が自分の想像と違う成果物を作る具体例を入れる"
+    }
+  ],
+  "revision_instruction": "冒頭に失敗例を置き、その後に goal では扱えない判断基準の話へつなげる",
+  "learned_signals": [
+    "ユーザは抽象概念より先に具体的な痛みを置く構成を好む"
+  ]
+}
+```
+
+## Verdicts
+
+Supported verdicts:
+
+- `accept`: the artifact is likely good enough for the user
+- `revise`: the direction is usable, but changes are needed
+- `reject`: the artifact is misaligned enough that revision is not the best next step
+
+## Learning Behavior
+
+The first implementation should learn from explicit feedback.
+
+Feedback loop:
+
+1. Store the agent's review.
+2. Store the user's actual judgment.
+3. Compare the two.
+4. Extract a judgment delta.
+5. Convert durable deltas into preference rules, negative patterns, or positive examples.
+6. Use the updated profile in the next review.
+
+The key learning unit is not a final score. It is the difference between what the
+agent thought and what the user actually judged.
+
+## MVP Scope
+
+The MVP should support:
+
+- Markdown or plain-text artifact reviews
+- the three initial task types: `blog_outline`, `talk_outline`, `video_script`
+- local JSON or Markdown persistence
+- `review` behavior that returns verdict, issues, revision instruction, and learned signals
+- `learn` behavior that records user feedback and updates the local profile
+- repeated iteration using the updated profile
+
+## Out of Scope for MVP
+
+The MVP should not require:
+
+- a web UI
+- vector database infrastructure
+- reinforcement learning
+- automatic full artifact generation
+- multi-user account management
+- a fully autonomous taste model
+
+LLM integration is useful, but the data model and workflow should remain explicit
+and inspectable even if an LLM performs the review.
+
+## Current Implementation Status
+
+The repository still includes the initial numeric option-ranking prototype. That
+can remain useful for explicit option selection, but the main implementation
+direction is now artifact review.
+
+Implemented first steps:
+
+- `ArtifactReviewRequest`, `ArtifactReview`, `ReviewIssue`, `UserFeedback`, and
+  `DecisionRecord` models
+- natural-language preference rules, negative patterns, and positive examples on
+  the profile
+- `review` CLI behavior that returns verdict, issues, revision instruction, and
+  learned signals
+- `learn` CLI behavior that stores feedback deltas and updates the local profile
+
+Still incomplete:
+
+- `iterate` orchestration around generator agents
+- LLM-backed review over richer natural-language criteria
+- stronger extraction of durable preference rules from free-form feedback
+- measurement of review accuracy across repeated user corrections
+- deeper optimization for user-aligned judgment, not only numeric scoring
+
+## Success Criteria
+
+Decision Agent is successful when repeated use makes its reviews more aligned with
+the user's actual judgment.
+
+Early success should be measured by:
+
+- whether it records feedback correctly
+- whether it can explain why an artifact needs revision
+- whether it produces useful next revision instructions
+- whether user corrections become durable profile updates
+
+Longer-term success should be measured by:
+
+- reduced number of user corrections per iteration
+- better first-pass review quality for similar task types
+- reuse of learned preferences across different creative workflows

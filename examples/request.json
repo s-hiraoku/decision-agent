@@ -1,0 +1,23 @@
+{
+  "context": "Choose a contractor for a production feature",
+  "alternatives": [
+    {
+      "name": "Fast vendor",
+      "attributes": {
+        "quality": 5,
+        "risk": 4,
+        "speed": 9,
+        "cost": 7
+      }
+    },
+    {
+      "name": "Reliable vendor",
+      "attributes": {
+        "quality": 9,
+        "risk": 8,
+        "speed": 6,
+        "cost": 6
+      }
+    }
+  ]
+}

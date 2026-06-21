@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decision-agent"
+version = "0.1.0"
+description = "A small agent that imitates a user's decision patterns from examples."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+decision-agent = "decision_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

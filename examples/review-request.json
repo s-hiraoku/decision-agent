@@ -1,0 +1,9 @@
+{
+  "task_type": "blog_outline",
+  "intent": "Decision Agent の構想を技術ブログにしたい",
+  "artifact": "This post explains the concept of a Decision Agent. First, it defines loop engineering and describes how agents can improve over time. Then it introduces a profile that stores user preferences. Finally, it concludes that better feedback loops are important.",
+  "context": {
+    "audience": "AI agent を使っている開発者",
+    "goal": "Loop engineering に Decision Agent が必要だと伝える"
+  }
+}

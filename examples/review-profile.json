@@ -1,0 +1,18 @@
+{
+  "user_id": "demo-user",
+  "criteria": {},
+  "preference_rules": [
+    "put a concrete pain point before abstract concept explanation",
+    "prefer implementation-oriented examples in technical blog outlines",
+    "make the reader understand why ordinary goal automation is not enough"
+  ],
+  "negative_patterns": [
+    "generic AI-like conclusion",
+    "abstract explanation before concrete problem",
+    "weak problem statement"
+  ],
+  "positive_examples": [
+    "start with a concrete failure where an agent produced something plausible but misaligned"
+  ],
+  "decision_records": []
+}

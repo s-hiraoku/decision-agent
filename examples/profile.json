@@ -1,0 +1,37 @@
+{
+  "user_id": "demo-user",
+  "criteria": {
+    "quality": 0.45,
+    "risk": 0.3,
+    "speed": 0.15,
+    "cost": 0.1
+  },
+  "examples": [
+    {
+      "context": "Choose a contractor for a production feature",
+      "alternatives": [
+        {
+          "name": "Cheap vendor",
+          "attributes": {
+            "quality": 5,
+            "risk": 4,
+            "speed": 8,
+            "cost": 9
+          }
+        },
+        {
+          "name": "Reliable vendor",
+          "attributes": {
+            "quality": 9,
+            "risk": 8,
+            "speed": 6,
+            "cost": 6
+          }
+        }
+      ],
+      "chosen": "Reliable vendor",
+      "rejected": ["Cheap vendor"],
+      "rationale": "Production work needs reliability more than low price."
+    }
+  ]
+}

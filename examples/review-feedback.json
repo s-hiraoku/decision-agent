@@ -1,0 +1,11 @@
+{
+  "verdict": "revise",
+  "notes": "抽象概念の説明から始まっていて、読者が困りごとを実感する前に話が進んでいる。",
+  "preference_rules": [
+    "start with a concrete failure case before naming the concept"
+  ],
+  "negative_patterns": [
+    "concept definition before user pain"
+  ],
+  "positive_examples": []
+}
