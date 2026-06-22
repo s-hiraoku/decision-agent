@@ -4,7 +4,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from decision_agent.models import Alternative, ArtifactReview, ArtifactReviewRequest, DecisionProfile, UserFeedback
+from decision_agent.models import (
+    Alternative,
+    ArtifactReview,
+    ArtifactReviewRequest,
+    DecisionProfile,
+    DecisionRecord,
+    UserFeedback,
+)
 
 
 def load_profile(path: str | Path) -> DecisionProfile:
@@ -34,6 +41,30 @@ def load_feedback(path: str | Path) -> UserFeedback:
     return UserFeedback.from_dict(_load_json(path))
 
 
+def load_decision_records(path: str | Path) -> tuple[DecisionRecord, ...]:
+    record_path = Path(path)
+    if not record_path.exists():
+        return ()
+
+    records: list[DecisionRecord] = []
+    with record_path.open("r", encoding="utf-8") as file:
+        for line in file:
+            if line.strip():
+                try:
+                    records.append(DecisionRecord.from_dict(json.loads(line)))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
+    return tuple(records)
+
+
+def append_decision_record(path: str | Path, record: DecisionRecord) -> None:
+    record_path = Path(path)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    with record_path.open("a", encoding="utf-8") as file:
+        json.dump(record.to_dict(), file, ensure_ascii=False)
+        file.write("\n")
+
+
 def _load_json(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as file:
         data = json.load(file)
@@ -43,6 +74,8 @@ def _load_json(path: str | Path) -> dict[str, Any]:
 
 
 def _save_json(data: dict[str, Any], path: str | Path) -> None:
-    with Path(path).open("w", encoding="utf-8") as file:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=2, ensure_ascii=False)
         file.write("\n")

@@ -18,6 +18,7 @@ A review profile contains:
 - natural-language preference rules
 - negative patterns
 - positive examples
+- known mistakes from prior verdict deltas
 - previous decision records
 
 Review an artifact:
@@ -26,16 +27,43 @@ Review an artifact:
 PYTHONPATH=src python -m decision_agent.cli review examples/review-profile.json examples/review-request.json
 ```
 
+Review with past records:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli review \
+  examples/review-profile.json \
+  examples/review-request.json \
+  --records /tmp/decision-agent-records/blog_outline.jsonl
+```
+
 Record feedback and update the profile:
 
 ```bash
 PYTHONPATH=src python -m decision_agent.cli review examples/review-profile.json examples/review-request.json > /tmp/review.json
-PYTHONPATH=src python -m decision_agent.cli learn examples/review-profile.json examples/review-request.json /tmp/review.json examples/review-feedback.json --output /tmp/learned-profile.json
+PYTHONPATH=src python -m decision_agent.cli learn \
+  examples/review-profile.json \
+  examples/review-request.json \
+  /tmp/review.json \
+  examples/review-feedback.json \
+  --records /tmp/decision-agent-records/blog_outline.jsonl \
+  --output /tmp/learned-profile.json
+```
+
+Run one full iteration:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli iterate \
+  examples/review-profile.json \
+  examples/review-request.json \
+  --feedback examples/review-feedback.json \
+  --records /tmp/decision-agent-records/blog_outline.jsonl \
+  --output /tmp/learned-profile.json
 ```
 
 The review path is intentionally simple for now: it checks the artifact against
-stored natural-language rules and preserves feedback deltas so later iterations can
-become more user-aligned.
+stored natural-language rules, known mistakes, and same-task history. Feedback is
+preserved as append-only JSONL records so later iterations can become more
+user-aligned.
 
 ## Option Ranking
 

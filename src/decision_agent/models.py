@@ -64,6 +64,7 @@ class DecisionProfile:
     preference_rules: tuple[str, ...] = ()
     negative_patterns: tuple[str, ...] = ()
     positive_examples: tuple[str, ...] = ()
+    known_mistakes: tuple["KnownMistake", ...] = ()
     decision_records: tuple["DecisionRecord", ...] = ()
 
     @classmethod
@@ -75,6 +76,7 @@ class DecisionProfile:
             preference_rules=tuple(str(item) for item in data.get("preference_rules", [])),
             negative_patterns=tuple(str(item) for item in data.get("negative_patterns", [])),
             positive_examples=tuple(str(item) for item in data.get("positive_examples", [])),
+            known_mistakes=tuple(KnownMistake.from_dict(item) for item in data.get("known_mistakes", [])),
             decision_records=tuple(DecisionRecord.from_dict(item) for item in data.get("decision_records", [])),
         )
 
@@ -86,6 +88,7 @@ class DecisionProfile:
             "preference_rules": list(self.preference_rules),
             "negative_patterns": list(self.negative_patterns),
             "positive_examples": list(self.positive_examples),
+            "known_mistakes": [item.to_dict() for item in self.known_mistakes],
             "decision_records": [item.to_dict() for item in self.decision_records],
         }
 
@@ -220,11 +223,35 @@ class UserFeedback:
 
 
 @dataclass(frozen=True)
+class KnownMistake:
+    pattern: str
+    correction: str
+    count: int = 1
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "KnownMistake":
+        return cls(
+            pattern=str(data.get("pattern", "")),
+            correction=str(data.get("correction", "")),
+            count=int(data.get("count", 1)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pattern": self.pattern,
+            "correction": self.correction,
+            "count": self.count,
+        }
+
+
+@dataclass(frozen=True)
 class DecisionRecord:
     request: ArtifactReviewRequest
     agent_review: ArtifactReview
     user_feedback: UserFeedback
     delta: str
+    id: str = ""
+    created_at: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DecisionRecord":
@@ -233,6 +260,8 @@ class DecisionRecord:
             agent_review=ArtifactReview.from_dict(data["agent_review"]),
             user_feedback=UserFeedback.from_dict(data["user_feedback"]),
             delta=str(data.get("delta", "")),
+            id=str(data.get("id", "")),
+            created_at=str(data.get("created_at", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -241,4 +270,6 @@ class DecisionRecord:
             "agent_review": self.agent_review.to_dict(),
             "user_feedback": self.user_feedback.to_dict(),
             "delta": self.delta,
+            "id": self.id,
+            "created_at": self.created_at,
         }

@@ -1,13 +1,17 @@
 import unittest
+from tempfile import TemporaryDirectory
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.models import (
     Alternative,
     ArtifactReviewRequest,
+    ArtifactReview,
     DecisionExample,
     DecisionProfile,
+    DecisionRecord,
     UserFeedback,
 )
+from decision_agent.storage import append_decision_record, load_decision_records
 
 
 class DecisionAgentTest(unittest.TestCase):
@@ -120,6 +124,172 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(len(learned.decision_records), 1)
         self.assertIn("start with a concrete failure case", learned.preference_rules)
         self.assertIn("concept definition before user pain", learned.negative_patterns)
+
+    def test_learn_promotes_verdict_delta_to_known_mistake(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "A detailed outline about Decision Agent. It explains the context, the loop, "
+                "the profile, the feedback path, and a concrete next step for readers who want "
+                "to improve agent output review quality over time."
+            ),
+        )
+        agent = DecisionAgent(profile)
+        review = agent.review(request)
+        feedback = UserFeedback(
+            verdict="reject",
+            notes="Problem framing is too weak.",
+            preference_rules=("start with a concrete failure before the concept",),
+        )
+
+        learned = agent.learn(request, review, feedback)
+
+        self.assertEqual(len(learned.known_mistakes), 1)
+        self.assertEqual(learned.known_mistakes[0].pattern, "Problem framing is too weak.")
+        self.assertIn("concrete failure", learned.known_mistakes[0].correction)
+
+    def test_review_uses_past_records_for_same_task_type(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "A detailed outline about Decision Agent. It explains the concept, profile, "
+                "feedback, and loop mechanics before showing why the reader should care about "
+                "judgment alignment in creative agent workflows."
+            ),
+        )
+        agent = DecisionAgent(profile)
+        review = agent.review(request)
+        feedback = UserFeedback(verdict="revise", notes="The concrete pain arrives too late.")
+        learned = agent.learn(request, review, feedback)
+
+        next_review = DecisionAgent(profile).review(request, history_records=learned.decision_records)
+
+        self.assertEqual(next_review.verdict, "revise")
+        self.assertTrue(any("similar past artifact" in issue.reason for issue in next_review.issues))
+
+    def test_review_honors_explicitly_empty_history_records(self) -> None:
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "A detailed outline about Decision Agent. It explains the concept, profile, "
+                "feedback, and loop mechanics before showing why the reader should care about "
+                "judgment alignment in creative agent workflows."
+            ),
+        )
+        record = DecisionRecord(
+            request=request,
+            agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+            user_feedback=UserFeedback(verdict="revise", notes="The concrete pain arrives too late."),
+            delta="agent verdict matched user feedback",
+        )
+        profile = DecisionProfile(user_id="u1", criteria={}, decision_records=(record,))
+
+        review = DecisionAgent(profile).review(request, history_records=())
+
+        self.assertEqual(review.verdict, "accept")
+        self.assertFalse(any("similar past artifact" in issue.reason for issue in review.issues))
+
+    def test_history_prefers_artifact_similarity_before_limit(self) -> None:
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="decision agent launch post",
+            artifact=(
+                "A concrete failure story opens the Decision Agent post. The artifact shows an "
+                "agent creating a plausible outline, the user rejecting it, and the loop learning "
+                "from that judgment delta."
+            ),
+        )
+        unrelated_records = tuple(
+            DecisionRecord(
+                request=ArtifactReviewRequest(
+                    task_type="blog_outline",
+                    intent="decision agent launch post",
+                    artifact=f"Unrelated draft {index} about packaging, release notes, setup, and repository hygiene.",
+                ),
+                agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+                user_feedback=UserFeedback(verdict="revise", notes=f"unrelated {index}"),
+                delta="agent verdict matched user feedback",
+                id=f"unrelated-{index}",
+            )
+            for index in range(3)
+        )
+        similar_record = DecisionRecord(
+            request=request,
+            agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+            user_feedback=UserFeedback(verdict="revise", notes="important similar artifact feedback"),
+            delta="agent verdict matched user feedback",
+            id="similar",
+        )
+
+        review = DecisionAgent(DecisionProfile(user_id="u1", criteria={})).review(
+            request,
+            history_records=(*unrelated_records, similar_record),
+        )
+
+        self.assertTrue(any("important similar artifact feedback" in issue.reason for issue in review.issues))
+
+    def test_decision_records_round_trip_as_jsonl(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        review = DecisionAgent(profile).review(request)
+        feedback = UserFeedback(verdict="revise", notes="Needs a sharper opening.")
+        learned = DecisionAgent(profile).learn(request, review, feedback)
+
+        with TemporaryDirectory() as directory:
+            record_path = f"{directory}/blog_outline.jsonl"
+            append_decision_record(record_path, learned.decision_records[-1])
+
+            records = load_decision_records(record_path)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].request.task_type, "blog_outline")
+        self.assertEqual(records[0].user_feedback.notes, "Needs a sharper opening.")
+
+    def test_record_ids_are_unique_for_repeated_learns(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        review = DecisionAgent(profile).review(request)
+        feedback = UserFeedback(verdict="revise", notes="Needs a sharper opening.")
+
+        first = DecisionAgent(profile).learn(request, review, feedback)
+        second = DecisionAgent(profile).learn(request, review, feedback)
+
+        self.assertNotEqual(first.decision_records[-1].id, second.decision_records[-1].id)
+
+    def test_load_decision_records_skips_malformed_jsonl_rows(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        review = DecisionAgent(profile).review(request)
+        feedback = UserFeedback(verdict="revise", notes="Needs a sharper opening.")
+        learned = DecisionAgent(profile).learn(request, review, feedback)
+
+        with TemporaryDirectory() as directory:
+            record_path = f"{directory}/blog_outline.jsonl"
+            with open(record_path, "w", encoding="utf-8") as file:
+                file.write("{bad json}\n")
+            append_decision_record(record_path, learned.decision_records[-1])
+
+            records = load_decision_records(record_path)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].user_feedback.notes, "Needs a sharper opening.")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from decision_agent.models import (
     DecisionProfile,
     DecisionRecord,
     DecisionResult,
+    KnownMistake,
     ReviewIssue,
     UserFeedback,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "DecisionProfile",
     "DecisionRecord",
     "DecisionResult",
+    "KnownMistake",
     "ReviewIssue",
     "UserFeedback",
 ]

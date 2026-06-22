@@ -6,6 +6,8 @@ from pathlib import Path
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.storage import (
+    append_decision_record,
+    load_decision_records,
     load_feedback,
     load_profile,
     load_request,
@@ -31,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     review_parser = subcommands.add_parser("review", help="Review a subjective artifact.")
     review_parser.add_argument("profile", type=Path)
     review_parser.add_argument("request", type=Path)
+    review_parser.add_argument("--records", type=Path, help="Read past decision records from JSONL.")
 
     learn_parser = subcommands.add_parser("learn", help="Record user feedback from a review.")
     learn_parser.add_argument("profile", type=Path)
@@ -38,6 +41,14 @@ def main(argv: list[str] | None = None) -> int:
     learn_parser.add_argument("review", type=Path)
     learn_parser.add_argument("feedback", type=Path)
     learn_parser.add_argument("--output", "-o", type=Path, required=True)
+    learn_parser.add_argument("--records", type=Path, help="Append the learned decision record to JSONL.")
+
+    iterate_parser = subcommands.add_parser("iterate", help="Review, learn from feedback, and append history.")
+    iterate_parser.add_argument("profile", type=Path)
+    iterate_parser.add_argument("request", type=Path)
+    iterate_parser.add_argument("--feedback", type=Path, required=True)
+    iterate_parser.add_argument("--records", type=Path, required=True)
+    iterate_parser.add_argument("--output", "-o", type=Path, required=True)
 
     args = parser.parse_args(argv)
 
@@ -57,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "review":
         profile = load_profile(args.profile)
         request = load_review_request(args.request)
-        review = DecisionAgent(profile).review(request)
+        records = load_decision_records(args.records) if args.records else ()
+        review = DecisionAgent(profile).review(request, history_records=records)
         print(json.dumps(review.to_dict(), indent=2, ensure_ascii=False))
         return 0
 
@@ -67,7 +79,33 @@ def main(argv: list[str] | None = None) -> int:
         review = load_review(args.review)
         feedback = load_feedback(args.feedback)
         learned = DecisionAgent(profile).learn(request, review, feedback)
+        if args.records:
+            append_decision_record(args.records, learned.decision_records[-1])
         save_profile(learned, args.output)
+        return 0
+
+    if args.command == "iterate":
+        profile = load_profile(args.profile)
+        request = load_review_request(args.request)
+        feedback = load_feedback(args.feedback)
+        records = load_decision_records(args.records)
+        agent = DecisionAgent(profile)
+        review = agent.review(request, history_records=records)
+        learned = agent.learn(request, review, feedback)
+        append_decision_record(args.records, learned.decision_records[-1])
+        save_profile(learned, args.output)
+        print(
+            json.dumps(
+                {
+                    "review": review.to_dict(),
+                    "record": learned.decision_records[-1].to_dict(),
+                    "profile": str(args.output),
+                    "records": str(args.records),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     parser.error(f"unknown command: {args.command}")
