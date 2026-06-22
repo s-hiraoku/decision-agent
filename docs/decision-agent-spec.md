@@ -116,6 +116,50 @@ It should include:
 - which preference rules it demonstrates
 - which task type it applies to
 
+### Known Mistake
+
+A known mistake stores a repeated or important way the agent's judgment differed
+from the user's judgment.
+
+Required fields:
+
+- `pattern`: the mistake pattern to watch for
+- `correction`: how the agent should adjust its next judgment
+- `count`: how many times this mistake has been observed
+
+Known mistakes are derived from verdict deltas. They are stronger than ordinary
+preference rules because they represent a case where the agent already made a
+wrong call.
+
+## History Persistence
+
+Decision records should be stored append-only as JSONL. The profile keeps the
+current judgment summary, while JSONL records preserve the raw evidence.
+
+Recommended local layout:
+
+```text
+profiles/
+  default.json
+
+records/
+  blog_outline.jsonl
+  talk_outline.jsonl
+  video_script.jsonl
+```
+
+Each iteration should:
+
+1. load the current profile
+2. load same-task records
+3. review the artifact using profile and history
+4. load explicit user feedback
+5. update the profile
+6. append the decision record to JSONL
+
+This keeps the profile editable while preserving enough history to re-check or
+rebuild the judgment model later.
+
 ## Review Input
 
 ```json
@@ -170,7 +214,9 @@ Feedback loop:
 3. Compare the two.
 4. Extract a judgment delta.
 5. Convert durable deltas into preference rules, negative patterns, or positive examples.
-6. Use the updated profile in the next review.
+6. Promote verdict mismatches into known mistakes.
+7. Append the raw decision record to JSONL.
+8. Use the updated profile and same-task records in the next review.
 
 The key learning unit is not a final score. It is the difference between what the
 agent thought and what the user actually judged.
@@ -184,6 +230,7 @@ The MVP should support:
 - local JSON or Markdown persistence
 - `review` behavior that returns verdict, issues, revision instruction, and learned signals
 - `learn` behavior that records user feedback and updates the local profile
+- `iterate` behavior that reviews, learns, and appends history in one command
 - repeated iteration using the updated profile
 
 ## Out of Scope for MVP
@@ -212,13 +259,17 @@ Implemented first steps:
   `DecisionRecord` models
 - natural-language preference rules, negative patterns, and positive examples on
   the profile
+- known mistakes promoted from verdict deltas
 - `review` CLI behavior that returns verdict, issues, revision instruction, and
   learned signals
-- `learn` CLI behavior that stores feedback deltas and updates the local profile
+- `learn` CLI behavior that stores feedback deltas, appends JSONL records, and
+  updates the local profile
+- `iterate` CLI behavior that reviews, learns, updates the profile, and appends
+  the raw record in one pass
 
 Still incomplete:
 
-- `iterate` orchestration around generator agents
+- orchestration around generator agents before the review step
 - LLM-backed review over richer natural-language criteria
 - stronger extraction of durable preference rules from free-form feedback
 - measurement of review accuracy across repeated user corrections

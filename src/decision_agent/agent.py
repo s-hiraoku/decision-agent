@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import UTC, datetime
 import math
 import re
-from dataclasses import replace
 
 from decision_agent.models import (
     Alternative,
@@ -12,6 +13,7 @@ from decision_agent.models import (
     DecisionProfile,
     DecisionRecord,
     DecisionResult,
+    KnownMistake,
     ReviewIssue,
     UserFeedback,
 )
@@ -21,6 +23,7 @@ MEMORY_WEIGHT = 0.25
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 REVIEW_TOKEN_RE = re.compile(r"\w+")
 MIN_USEFUL_ARTIFACT_LENGTH = 120
+HISTORY_MATCH_LIMIT = 3
 
 
 class DecisionAgent:
@@ -79,9 +82,14 @@ class DecisionAgent:
 
         return replace(self.profile, criteria=_normalize_weights(criteria))
 
-    def review(self, request: ArtifactReviewRequest) -> ArtifactReview:
+    def review(
+        self,
+        request: ArtifactReviewRequest,
+        history_records: tuple[DecisionRecord, ...] = (),
+    ) -> ArtifactReview:
         text = _review_text(request)
         issues: list[ReviewIssue] = []
+        relevant_records = _relevant_records(request, history_records or self.profile.decision_records)
 
         if len(request.artifact.strip()) < MIN_USEFUL_ARTIFACT_LENGTH:
             issues.append(
@@ -91,6 +99,28 @@ class DecisionAgent:
                     suggestion="add enough outline, script, or draft detail before asking for a final judgment",
                 )
             )
+
+        for mistake in self.profile.known_mistakes:
+            if _text_similarity(mistake.pattern, text) >= 0.2:
+                issues.append(
+                    ReviewIssue(
+                        severity="high",
+                        reason=f"resembles known mistake: {mistake.pattern}",
+                        suggestion=mistake.correction,
+                    )
+                )
+
+        for record in relevant_records[:HISTORY_MATCH_LIMIT]:
+            rejected_before = record.user_feedback.verdict in {"revise", "reject"}
+            similar_artifact = _text_similarity(record.request.artifact, text) >= 0.2
+            if rejected_before and similar_artifact:
+                issues.append(
+                    ReviewIssue(
+                        severity="medium",
+                        reason=f"similar past artifact was judged {record.user_feedback.verdict}: {record.user_feedback.notes}",
+                        suggestion="compare against the past feedback before accepting this artifact",
+                    )
+                )
 
         negative_matches = _matched_items(self.profile.negative_patterns, text)
         for pattern in negative_matches:
@@ -124,7 +154,10 @@ class DecisionAgent:
         confidence = _review_confidence(issues, matched_rules, positive_matches)
         summary = _review_summary(verdict, issues, matched_rules, positive_matches)
         revision_instruction = _revision_instruction(verdict, issues)
-        learned_signals = tuple(f"checked preference rule: {rule}" for rule in matched_rules[:3])
+        learned_signals = (
+            *(f"checked preference rule: {rule}" for rule in matched_rules[:3]),
+            *(f"used past record: {record.id}" for record in relevant_records[:2] if record.id),
+        )
 
         return ArtifactReview(
             verdict=verdict,
@@ -147,6 +180,8 @@ class DecisionAgent:
             agent_review=agent_review,
             user_feedback=user_feedback,
             delta=delta,
+            id=_record_id(request),
+            created_at=datetime.now(UTC).isoformat(),
         )
 
         return replace(
@@ -154,6 +189,7 @@ class DecisionAgent:
             preference_rules=_append_unique(self.profile.preference_rules, user_feedback.preference_rules),
             negative_patterns=_append_unique(self.profile.negative_patterns, user_feedback.negative_patterns),
             positive_examples=_append_unique(self.profile.positive_examples, user_feedback.positive_examples),
+            known_mistakes=_update_known_mistakes(self.profile.known_mistakes, agent_review, user_feedback),
             decision_records=(*self.profile.decision_records, record),
         )
 
@@ -289,6 +325,61 @@ def _feedback_delta(agent_review: ArtifactReview, user_feedback: UserFeedback) -
     if agent_review.verdict == user_feedback.verdict:
         return "agent verdict matched user feedback"
     return f"agent predicted {agent_review.verdict}, user judged {user_feedback.verdict}: {user_feedback.notes}"
+
+
+def _record_id(request: ArtifactReviewRequest) -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    intent_tokens = [token.lower() for token in TOKEN_RE.findall(request.intent) if len(token) > 2]
+    intent = "-".join(sorted(intent_tokens)[:4]) or "review"
+    return f"{timestamp}-{request.task_type}-{intent}"
+
+
+def _relevant_records(
+    request: ArtifactReviewRequest,
+    records: tuple[DecisionRecord, ...],
+) -> list[DecisionRecord]:
+    same_task = [record for record in records if record.request.task_type == request.task_type]
+    return sorted(
+        same_task,
+        key=lambda record: (_text_similarity(request.intent, record.request.intent), record.created_at),
+        reverse=True,
+    )
+
+
+def _update_known_mistakes(
+    current: tuple[KnownMistake, ...],
+    agent_review: ArtifactReview,
+    user_feedback: UserFeedback,
+) -> tuple[KnownMistake, ...]:
+    if agent_review.verdict == user_feedback.verdict:
+        return current
+
+    pattern = user_feedback.notes.strip() or f"agent predicted {agent_review.verdict} when user judged {user_feedback.verdict}"
+    correction = _mistake_correction(user_feedback)
+    values: list[KnownMistake] = []
+    updated = False
+
+    for mistake in current:
+        if mistake.pattern == pattern:
+            values.append(replace(mistake, count=mistake.count + 1, correction=correction or mistake.correction))
+            updated = True
+        else:
+            values.append(mistake)
+
+    if not updated:
+        values.append(KnownMistake(pattern=pattern, correction=correction, count=1))
+
+    return tuple(values)
+
+
+def _mistake_correction(user_feedback: UserFeedback) -> str:
+    if user_feedback.preference_rules:
+        return " ".join(user_feedback.preference_rules)
+    if user_feedback.negative_patterns:
+        return "avoid: " + "; ".join(user_feedback.negative_patterns)
+    if user_feedback.notes:
+        return user_feedback.notes
+    return "ask for user feedback before accepting similar artifacts"
 
 
 def _append_unique(current: tuple[str, ...], additions: tuple[str, ...]) -> tuple[str, ...]:

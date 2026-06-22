@@ -14,5 +14,6 @@
   "positive_examples": [
     "start with a concrete failure where an agent produced something plausible but misaligned"
   ],
+  "known_mistakes": [],
   "decision_records": []
 }
