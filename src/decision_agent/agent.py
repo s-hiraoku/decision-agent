@@ -85,11 +85,12 @@ class DecisionAgent:
     def review(
         self,
         request: ArtifactReviewRequest,
-        history_records: tuple[DecisionRecord, ...] = (),
+        history_records: tuple[DecisionRecord, ...] | None = None,
     ) -> ArtifactReview:
         text = _review_text(request)
         issues: list[ReviewIssue] = []
-        relevant_records = _relevant_records(request, history_records or self.profile.decision_records)
+        records = self.profile.decision_records if history_records is None else history_records
+        relevant_records = _relevant_records(request, records)
 
         if len(request.artifact.strip()) < MIN_USEFUL_ARTIFACT_LENGTH:
             issues.append(
@@ -341,7 +342,11 @@ def _relevant_records(
     same_task = [record for record in records if record.request.task_type == request.task_type]
     return sorted(
         same_task,
-        key=lambda record: (_text_similarity(request.intent, record.request.intent), record.created_at),
+        key=lambda record: (
+            _text_similarity(request.artifact, record.request.artifact),
+            _text_similarity(request.intent, record.request.intent),
+            record.created_at,
+        ),
         reverse=True,
     )
 

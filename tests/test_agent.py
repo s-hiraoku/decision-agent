@@ -5,8 +5,10 @@ from decision_agent.agent import DecisionAgent
 from decision_agent.models import (
     Alternative,
     ArtifactReviewRequest,
+    ArtifactReview,
     DecisionExample,
     DecisionProfile,
+    DecisionRecord,
     UserFeedback,
 )
 from decision_agent.storage import append_decision_record, load_decision_records
@@ -168,6 +170,68 @@ class DecisionAgentTest(unittest.TestCase):
 
         self.assertEqual(next_review.verdict, "revise")
         self.assertTrue(any("similar past artifact" in issue.reason for issue in next_review.issues))
+
+    def test_review_honors_explicitly_empty_history_records(self) -> None:
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "A detailed outline about Decision Agent. It explains the concept, profile, "
+                "feedback, and loop mechanics before showing why the reader should care about "
+                "judgment alignment in creative agent workflows."
+            ),
+        )
+        record = DecisionRecord(
+            request=request,
+            agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+            user_feedback=UserFeedback(verdict="revise", notes="The concrete pain arrives too late."),
+            delta="agent verdict matched user feedback",
+        )
+        profile = DecisionProfile(user_id="u1", criteria={}, decision_records=(record,))
+
+        review = DecisionAgent(profile).review(request, history_records=())
+
+        self.assertEqual(review.verdict, "accept")
+        self.assertFalse(any("similar past artifact" in issue.reason for issue in review.issues))
+
+    def test_history_prefers_artifact_similarity_before_limit(self) -> None:
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="decision agent launch post",
+            artifact=(
+                "A concrete failure story opens the Decision Agent post. The artifact shows an "
+                "agent creating a plausible outline, the user rejecting it, and the loop learning "
+                "from that judgment delta."
+            ),
+        )
+        unrelated_records = tuple(
+            DecisionRecord(
+                request=ArtifactReviewRequest(
+                    task_type="blog_outline",
+                    intent="decision agent launch post",
+                    artifact=f"Unrelated draft {index} about packaging, release notes, setup, and repository hygiene.",
+                ),
+                agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+                user_feedback=UserFeedback(verdict="revise", notes=f"unrelated {index}"),
+                delta="agent verdict matched user feedback",
+                id=f"unrelated-{index}",
+            )
+            for index in range(3)
+        )
+        similar_record = DecisionRecord(
+            request=request,
+            agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+            user_feedback=UserFeedback(verdict="revise", notes="important similar artifact feedback"),
+            delta="agent verdict matched user feedback",
+            id="similar",
+        )
+
+        review = DecisionAgent(DecisionProfile(user_id="u1", criteria={})).review(
+            request,
+            history_records=(*unrelated_records, similar_record),
+        )
+
+        self.assertTrue(any("important similar artifact feedback" in issue.reason for issue in review.issues))
 
     def test_decision_records_round_trip_as_jsonl(self) -> None:
         profile = DecisionProfile(user_id="u1", criteria={})
