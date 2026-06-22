@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime
 import math
@@ -14,6 +16,9 @@ from decision_agent.models import (
     DecisionProfile,
     DecisionRecord,
     DecisionResult,
+    EvaluationCase,
+    EvaluationCaseResult,
+    EvaluationReport,
     KnownMistake,
     ReviewIssue,
     UserFeedback,
@@ -195,6 +200,54 @@ class DecisionAgent:
             decision_records=(*self.profile.decision_records, record),
         )
 
+    def evaluate(
+        self,
+        cases: tuple[EvaluationCase, ...],
+        history_records: tuple[DecisionRecord, ...] | None = None,
+    ) -> EvaluationReport:
+        records = self.profile.decision_records if history_records is None else history_records
+        results: list[EvaluationCaseResult] = []
+
+        for index, case in enumerate(cases, start=1):
+            review = self.review(case.request, history_records=records)
+            judgment = case.user_judgment
+            missed_core_issues = tuple(
+                issue for issue in judgment.core_issues if not _text_matches_review(issue, review)
+            )
+            core_issue_agreement = None
+            if judgment.core_issues:
+                core_issue_agreement = len(missed_core_issues) == 0
+
+            revision_direction_agreement = None
+            if judgment.revision_direction:
+                revision_direction_agreement = _text_matches_review(judgment.revision_direction, review)
+
+            suggested_updates = _evaluation_profile_updates(case, review, missed_core_issues)
+            results.append(
+                EvaluationCaseResult(
+                    id=case.id or f"case-{index}",
+                    agent_verdict=review.verdict,
+                    user_verdict=judgment.verdict,
+                    verdict_agreement=review.verdict == judgment.verdict,
+                    core_issue_agreement=core_issue_agreement,
+                    revision_direction_agreement=revision_direction_agreement,
+                    missed_core_issues=missed_core_issues,
+                    suggested_profile_updates=suggested_updates,
+                )
+            )
+
+        return EvaluationReport(
+            cases=len(cases),
+            verdict_accuracy=_boolean_accuracy(result.verdict_agreement for result in results),
+            core_issue_accuracy=_optional_boolean_accuracy(result.core_issue_agreement for result in results),
+            revision_direction_accuracy=_optional_boolean_accuracy(
+                result.revision_direction_agreement for result in results
+            ),
+            common_misses=_common_misses(results),
+            suggested_profile_updates=_unique_suggestions(results),
+            case_results=tuple(results),
+        )
+
     def _criterion_score(self, alternative: Alternative) -> tuple[float, list[str]]:
         weights = _normalize_weights(self.profile.criteria)
         score = 0.0
@@ -327,6 +380,63 @@ def _feedback_delta(agent_review: ArtifactReview, user_feedback: UserFeedback) -
     if agent_review.verdict == user_feedback.verdict:
         return "agent verdict matched user feedback"
     return f"agent predicted {agent_review.verdict}, user judged {user_feedback.verdict}: {user_feedback.notes}"
+
+
+def _text_matches_review(text: str, review: ArtifactReview) -> bool:
+    review_text = _review_signal_text(review)
+    return text.lower() in review_text or _text_similarity(text, review_text) >= 0.25
+
+
+def _review_signal_text(review: ArtifactReview) -> str:
+    issue_text = " ".join(f"{issue.reason} {issue.suggestion}" for issue in review.issues)
+    return f"{review.summary} {review.revision_instruction} {issue_text} {' '.join(review.learned_signals)}".lower()
+
+
+def _evaluation_profile_updates(
+    case: EvaluationCase,
+    review: ArtifactReview,
+    missed_core_issues: tuple[str, ...],
+) -> tuple[str, ...]:
+    updates: list[str] = []
+    judgment = case.user_judgment
+
+    if review.verdict != judgment.verdict:
+        reason = judgment.notes or judgment.revision_direction or "user judgment differed from agent judgment"
+        updates.append(f"for {case.request.task_type}, prefer {judgment.verdict} when: {reason}")
+
+    for issue in missed_core_issues:
+        updates.append(f"for {case.request.task_type}, check whether: {issue}")
+
+    if judgment.revision_direction and not _text_matches_review(judgment.revision_direction, review):
+        updates.append(f"for {case.request.task_type}, prefer revision direction: {judgment.revision_direction}")
+
+    return _append_unique((), tuple(updates))
+
+
+def _boolean_accuracy(values: Iterable[bool]) -> float:
+    items = list(values)
+    if not items:
+        return 0.0
+    return round(sum(1 for item in items if item) / len(items), 4)
+
+
+def _optional_boolean_accuracy(values: Iterable[bool | None]) -> float | None:
+    items = [item for item in values if item is not None]
+    if not items:
+        return None
+    return round(sum(1 for item in items if item) / len(items), 4)
+
+
+def _common_misses(results: list[EvaluationCaseResult]) -> tuple[str, ...]:
+    counter = Counter(issue for result in results for issue in result.missed_core_issues)
+    return tuple(issue for issue, _count in counter.most_common(5))
+
+
+def _unique_suggestions(results: list[EvaluationCaseResult]) -> tuple[str, ...]:
+    suggestions: tuple[str, ...] = ()
+    for result in results:
+        suggestions = _append_unique(suggestions, result.suggested_profile_updates)
+    return suggestions[:10]
 
 
 def _record_id(request: ArtifactReviewRequest) -> str:

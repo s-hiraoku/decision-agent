@@ -8,6 +8,7 @@ from decision_agent.agent import DecisionAgent
 from decision_agent.storage import (
     append_decision_record,
     load_decision_records,
+    load_evaluation_cases,
     load_feedback,
     load_profile,
     load_request,
@@ -50,6 +51,11 @@ def main(argv: list[str] | None = None) -> int:
     iterate_parser.add_argument("--records", type=Path, required=True)
     iterate_parser.add_argument("--output", "-o", type=Path, required=True)
 
+    evaluate_parser = subcommands.add_parser("evaluate", help="Compare agent reviews against user judgments.")
+    evaluate_parser.add_argument("profile", type=Path)
+    evaluate_parser.add_argument("cases", type=Path)
+    evaluate_parser.add_argument("--records", type=Path, help="Read past decision records from JSONL.")
+
     args = parser.parse_args(argv)
 
     if args.command == "decide":
@@ -68,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "review":
         profile = load_profile(args.profile)
         request = load_review_request(args.request)
-        records = load_decision_records(args.records) if args.records else ()
+        records = load_decision_records(args.records) if args.records else None
         review = DecisionAgent(profile).review(request, history_records=records)
         print(json.dumps(review.to_dict(), indent=2, ensure_ascii=False))
         return 0
@@ -106,6 +112,14 @@ def main(argv: list[str] | None = None) -> int:
                 ensure_ascii=False,
             )
         )
+        return 0
+
+    if args.command == "evaluate":
+        profile = load_profile(args.profile)
+        cases = load_evaluation_cases(args.cases)
+        records = load_decision_records(args.records) if args.records else None
+        report = DecisionAgent(profile).evaluate(cases, history_records=records)
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
         return 0
 
     parser.error(f"unknown command: {args.command}")
