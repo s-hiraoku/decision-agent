@@ -21,6 +21,14 @@ A review profile contains:
 - known mistakes from prior verdict deltas
 - previous decision records
 
+Recommended local layout:
+
+```text
+profiles/default.json
+records/blog_outline.jsonl
+cases/blog_outline_cases.jsonl
+```
+
 Review an artifact:
 
 ```bash
@@ -60,10 +68,23 @@ PYTHONPATH=src python -m decision_agent.cli iterate \
   --output /tmp/learned-profile.json
 ```
 
+Evaluate whether the agent is getting closer to the user's judgment:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli evaluate \
+  examples/review-profile.json \
+  examples/blog-outline-cases.jsonl \
+  --records /tmp/decision-agent-records/blog_outline.jsonl
+```
+
 The review path is intentionally simple for now: it checks the artifact against
 stored natural-language rules, known mistakes, and same-task history. Feedback is
 preserved as append-only JSONL records so later iterations can become more
 user-aligned.
+
+See [docs/operation-guide.md](docs/operation-guide.md) for the intended operating
+loop: review, capture user judgment, iterate, evaluate, then update the profile
+only with rules the user agrees with.
 
 ## Option Ranking
 
