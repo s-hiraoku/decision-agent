@@ -50,7 +50,10 @@ def load_decision_records(path: str | Path) -> tuple[DecisionRecord, ...]:
     with record_path.open("r", encoding="utf-8") as file:
         for line in file:
             if line.strip():
-                records.append(DecisionRecord.from_dict(json.loads(line)))
+                try:
+                    records.append(DecisionRecord.from_dict(json.loads(line)))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
     return tuple(records)
 
 

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import math
 import re
+import uuid
 
 from decision_agent.models import (
     Alternative,
@@ -329,10 +330,10 @@ def _feedback_delta(agent_review: ArtifactReview, user_feedback: UserFeedback) -
 
 
 def _record_id(request: ArtifactReviewRequest) -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     intent_tokens = [token.lower() for token in TOKEN_RE.findall(request.intent) if len(token) > 2]
     intent = "-".join(sorted(intent_tokens)[:4]) or "review"
-    return f"{timestamp}-{request.task_type}-{intent}"
+    return f"{timestamp}-{request.task_type}-{intent}-{uuid.uuid4().hex[:8]}"
 
 
 def _relevant_records(

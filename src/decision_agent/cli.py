@@ -79,9 +79,9 @@ def main(argv: list[str] | None = None) -> int:
         review = load_review(args.review)
         feedback = load_feedback(args.feedback)
         learned = DecisionAgent(profile).learn(request, review, feedback)
-        save_profile(learned, args.output)
         if args.records:
             append_decision_record(args.records, learned.decision_records[-1])
+        save_profile(learned, args.output)
         return 0
 
     if args.command == "iterate":
@@ -92,8 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         agent = DecisionAgent(profile)
         review = agent.review(request, history_records=records)
         learned = agent.learn(request, review, feedback)
-        save_profile(learned, args.output)
         append_decision_record(args.records, learned.decision_records[-1])
+        save_profile(learned, args.output)
         print(
             json.dumps(
                 {

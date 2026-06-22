@@ -254,6 +254,43 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(records[0].request.task_type, "blog_outline")
         self.assertEqual(records[0].user_feedback.notes, "Needs a sharper opening.")
 
+    def test_record_ids_are_unique_for_repeated_learns(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        review = DecisionAgent(profile).review(request)
+        feedback = UserFeedback(verdict="revise", notes="Needs a sharper opening.")
+
+        first = DecisionAgent(profile).learn(request, review, feedback)
+        second = DecisionAgent(profile).learn(request, review, feedback)
+
+        self.assertNotEqual(first.decision_records[-1].id, second.decision_records[-1].id)
+
+    def test_load_decision_records_skips_malformed_jsonl_rows(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        review = DecisionAgent(profile).review(request)
+        feedback = UserFeedback(verdict="revise", notes="Needs a sharper opening.")
+        learned = DecisionAgent(profile).learn(request, review, feedback)
+
+        with TemporaryDirectory() as directory:
+            record_path = f"{directory}/blog_outline.jsonl"
+            with open(record_path, "w", encoding="utf-8") as file:
+                file.write("{bad json}\n")
+            append_decision_record(record_path, learned.decision_records[-1])
+
+            records = load_decision_records(record_path)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].user_feedback.notes, "Needs a sharper opening.")
+
 
 if __name__ == "__main__":
     unittest.main()
