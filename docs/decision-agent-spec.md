@@ -23,6 +23,10 @@ how the user judges outputs over repeated iterations.
 
 The central responsibility is judgment, not generation.
 
+For day-to-day usage, see [Operation Guide](operation-guide.md). This document
+defines the data model and behavior; the operation guide explains how to run the
+review, iteration, and evaluation loop.
+
 ## Core Concept
 
 Decision Agent reviews an artifact and predicts how the user would respond.
@@ -131,6 +135,20 @@ Known mistakes are derived from verdict deltas. They are stronger than ordinary
 preference rules because they represent a case where the agent already made a
 wrong call.
 
+### Evaluation Case
+
+An evaluation case is a fixed test case for measuring whether Decision Agent is
+getting closer to the user's judgment.
+
+Required fields:
+
+- `request`: the artifact review request
+- `user_judgment`: the user's expected judgment for that artifact
+- `id`: stable case identifier
+
+Evaluation cases are not operational history. They should be curated examples
+that represent important judgment patterns.
+
 ## History Persistence
 
 Decision records should be stored append-only as JSONL. The profile keeps the
@@ -146,6 +164,9 @@ records/
   blog_outline.jsonl
   talk_outline.jsonl
   video_script.jsonl
+
+cases/
+  blog_outline_cases.jsonl
 ```
 
 Each iteration should:
@@ -159,6 +180,61 @@ Each iteration should:
 
 This keeps the profile editable while preserving enough history to re-check or
 rebuild the judgment model later.
+
+## Evaluation Loop
+
+Evaluation measures how close the agent's review is to the user's judgment.
+
+The current implementation compares:
+
+- `verdict_accuracy`: whether `accept`, `revise`, or `reject` matches
+- `core_issue_accuracy`: whether the agent noticed the user's core issues
+- `revision_direction_accuracy`: whether the suggested direction is close to the
+  user's expected direction
+
+Evaluation input is a JSONL file:
+
+```json
+{
+  "id": "blog-outline-concept-first",
+  "request": {
+    "task_type": "blog_outline",
+    "intent": "Decision Agent の構想を技術ブログにしたい",
+    "artifact": "評価対象のアウトライン",
+    "context": {
+      "audience": "AI agent を使っている開発者"
+    }
+  },
+  "user_judgment": {
+    "verdict": "revise",
+    "notes": "抽象概念の説明から始まっている",
+    "core_issues": [
+      "concrete pain point is missing before concept explanation"
+    ],
+    "revision_direction": "Start with a concrete failure case."
+  }
+}
+```
+
+Evaluation output:
+
+```json
+{
+  "cases": 2,
+  "verdict_accuracy": 0.5,
+  "core_issue_accuracy": 0.5,
+  "revision_direction_accuracy": 0.5,
+  "common_misses": [
+    "problem framing is weak"
+  ],
+  "suggested_profile_updates": [
+    "for blog_outline, check whether: problem framing is weak"
+  ]
+}
+```
+
+Suggested profile updates are proposals, not automatic truth. The user should
+review them and only keep rules that actually represent their judgment.
 
 ## Review Input
 
@@ -231,6 +307,7 @@ The MVP should support:
 - `review` behavior that returns verdict, issues, revision instruction, and learned signals
 - `learn` behavior that records user feedback and updates the local profile
 - `iterate` behavior that reviews, learns, and appends history in one command
+- `evaluate` behavior that compares agent reviews against fixed user judgments
 - repeated iteration using the updated profile
 
 ## Out of Scope for MVP
@@ -266,13 +343,15 @@ Implemented first steps:
   updates the local profile
 - `iterate` CLI behavior that reviews, learns, updates the profile, and appends
   the raw record in one pass
+- `evaluate` CLI behavior that reports verdict, core issue, and revision
+  direction alignment
 
 Still incomplete:
 
 - orchestration around generator agents before the review step
 - LLM-backed review over richer natural-language criteria
 - stronger extraction of durable preference rules from free-form feedback
-- measurement of review accuracy across repeated user corrections
+- stronger semantic matching for evaluation beyond simple text similarity
 - deeper optimization for user-aligned judgment, not only numeric scoring
 
 ## Success Criteria

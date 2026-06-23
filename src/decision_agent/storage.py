@@ -10,6 +10,7 @@ from decision_agent.models import (
     ArtifactReviewRequest,
     DecisionProfile,
     DecisionRecord,
+    EvaluationCase,
     UserFeedback,
 )
 
@@ -55,6 +56,18 @@ def load_decision_records(path: str | Path) -> tuple[DecisionRecord, ...]:
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     continue
     return tuple(records)
+
+
+def load_evaluation_cases(path: str | Path) -> tuple[EvaluationCase, ...]:
+    cases: list[EvaluationCase] = []
+    with Path(path).open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            if line.strip():
+                try:
+                    cases.append(EvaluationCase.from_dict(json.loads(line)))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+                    raise ValueError(f"malformed evaluation case row {line_number}: {error}") from error
+    return tuple(cases)
 
 
 def append_decision_record(path: str | Path, record: DecisionRecord) -> None:

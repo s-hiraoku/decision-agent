@@ -1,3 +1,4 @@
+import json
 import unittest
 from tempfile import TemporaryDirectory
 
@@ -9,9 +10,10 @@ from decision_agent.models import (
     DecisionExample,
     DecisionProfile,
     DecisionRecord,
+    EvaluationCase,
     UserFeedback,
 )
-from decision_agent.storage import append_decision_record, load_decision_records
+from decision_agent.storage import append_decision_record, load_decision_records, load_evaluation_cases
 
 
 class DecisionAgentTest(unittest.TestCase):
@@ -290,6 +292,103 @@ class DecisionAgentTest(unittest.TestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].user_feedback.notes, "Needs a sharper opening.")
+
+    def test_evaluate_reports_alignment_and_profile_updates(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        mismatch_case = EvaluationCase(
+            id="concept-first",
+            request=ArtifactReviewRequest(
+                task_type="blog_outline",
+                intent="write about Decision Agent",
+                artifact=(
+                    "This outline defines Decision Agent, explains loop engineering, describes "
+                    "profiles, and then concludes that better feedback loops improve agent output. "
+                    "It is coherent but does not show a concrete user pain before the concept."
+                ),
+            ),
+            user_judgment=UserFeedback(
+                verdict="revise",
+                notes="Problem framing is weak.",
+                core_issues=("problem framing is weak",),
+                revision_direction="start with a concrete failure case",
+            ),
+        )
+        aligned_case = EvaluationCase(
+            id="too-short",
+            request=ArtifactReviewRequest(
+                task_type="blog_outline",
+                intent="write about Decision Agent",
+                artifact="Too short.",
+            ),
+            user_judgment=UserFeedback(
+                verdict="revise",
+                notes="Too short to judge.",
+                core_issues=("artifact is too short",),
+                revision_direction="add enough outline detail",
+            ),
+        )
+
+        report = DecisionAgent(profile).evaluate((mismatch_case, aligned_case))
+
+        self.assertEqual(report.cases, 2)
+        self.assertEqual(report.verdict_accuracy, 0.5)
+        self.assertIn("problem framing is weak", report.common_misses)
+        concept_first_result = next(result for result in report.case_results if result.id == "concept-first")
+        self.assertFalse(concept_first_result.verdict_agreement)
+        self.assertTrue(concept_first_result.suggested_profile_updates)
+
+    def test_load_evaluation_cases_reports_invalid_json_rows(self) -> None:
+        case = EvaluationCase(
+            id="case-1",
+            request=ArtifactReviewRequest(
+                task_type="blog_outline",
+                intent="write about Decision Agent",
+                artifact="A short outline.",
+            ),
+            user_judgment=UserFeedback(verdict="revise", notes="Needs detail."),
+        )
+
+        with TemporaryDirectory() as directory:
+            case_path = f"{directory}/cases.jsonl"
+            with open(case_path, "w", encoding="utf-8") as file:
+                file.write("{bad json}\n")
+                file.write(json.dumps(case.to_dict(), ensure_ascii=False))
+                file.write("\n")
+
+            with self.assertRaisesRegex(ValueError, "malformed evaluation case row 1"):
+                load_evaluation_cases(case_path)
+
+    def test_load_evaluation_cases_reports_invalid_schema_rows(self) -> None:
+        case = EvaluationCase(
+            id="case-1",
+            request=ArtifactReviewRequest(
+                task_type="blog_outline",
+                intent="write about Decision Agent",
+                artifact="A short outline.",
+            ),
+            user_judgment=UserFeedback(verdict="revise", notes="Needs detail."),
+        )
+
+        with TemporaryDirectory() as directory:
+            case_path = f"{directory}/cases.jsonl"
+            with open(case_path, "w", encoding="utf-8") as file:
+                file.write(json.dumps(case.to_dict(), ensure_ascii=False))
+                file.write("\n")
+                file.write(json.dumps({"id": "bad-shape", "request": {"task_type": "blog_outline"}}))
+                file.write("\n")
+
+            with self.assertRaisesRegex(ValueError, "malformed evaluation case row 2"):
+                load_evaluation_cases(case_path)
+
+    def test_user_feedback_accepts_scalar_core_issue(self) -> None:
+        feedback = UserFeedback.from_dict(
+            {
+                "verdict": "revise",
+                "core_issues": "problem framing is weak",
+            }
+        )
+
+        self.assertEqual(feedback.core_issues, ("problem framing is weak",))
 
 
 if __name__ == "__main__":

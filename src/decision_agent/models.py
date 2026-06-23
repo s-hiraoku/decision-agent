@@ -198,6 +198,8 @@ class UserFeedback:
     preference_rules: tuple[str, ...] = ()
     negative_patterns: tuple[str, ...] = ()
     positive_examples: tuple[str, ...] = ()
+    core_issues: tuple[str, ...] = ()
+    revision_direction: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "UserFeedback":
@@ -210,12 +212,16 @@ class UserFeedback:
             preference_rules=tuple(str(item) for item in data.get("preference_rules", [])),
             negative_patterns=tuple(str(item) for item in data.get("negative_patterns", [])),
             positive_examples=tuple(str(item) for item in data.get("positive_examples", [])),
+            core_issues=_string_tuple(data.get("core_issues", []), field_name="core_issues"),
+            revision_direction=str(data.get("revision_direction", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict,
             "notes": self.notes,
+            "core_issues": list(self.core_issues),
+            "revision_direction": self.revision_direction,
             "preference_rules": list(self.preference_rules),
             "negative_patterns": list(self.negative_patterns),
             "positive_examples": list(self.positive_examples),
@@ -273,3 +279,81 @@ class DecisionRecord:
             "id": self.id,
             "created_at": self.created_at,
         }
+
+
+@dataclass(frozen=True)
+class EvaluationCase:
+    request: ArtifactReviewRequest
+    user_judgment: UserFeedback
+    id: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EvaluationCase":
+        return cls(
+            request=ArtifactReviewRequest.from_dict(data["request"]),
+            user_judgment=UserFeedback.from_dict(data["user_judgment"]),
+            id=str(data.get("id", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "request": self.request.to_dict(),
+            "user_judgment": self.user_judgment.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationCaseResult:
+    id: str
+    agent_verdict: str
+    user_verdict: str
+    verdict_agreement: bool
+    core_issue_agreement: bool | None
+    revision_direction_agreement: bool | None
+    missed_core_issues: tuple[str, ...] = ()
+    suggested_profile_updates: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "agent_verdict": self.agent_verdict,
+            "user_verdict": self.user_verdict,
+            "verdict_agreement": self.verdict_agreement,
+            "core_issue_agreement": self.core_issue_agreement,
+            "revision_direction_agreement": self.revision_direction_agreement,
+            "missed_core_issues": list(self.missed_core_issues),
+            "suggested_profile_updates": list(self.suggested_profile_updates),
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationReport:
+    cases: int
+    verdict_accuracy: float
+    core_issue_accuracy: float | None
+    revision_direction_accuracy: float | None
+    common_misses: tuple[str, ...] = ()
+    suggested_profile_updates: tuple[str, ...] = ()
+    case_results: tuple[EvaluationCaseResult, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cases": self.cases,
+            "verdict_accuracy": self.verdict_accuracy,
+            "core_issue_accuracy": self.core_issue_accuracy,
+            "revision_direction_accuracy": self.revision_direction_accuracy,
+            "common_misses": list(self.common_misses),
+            "suggested_profile_updates": list(self.suggested_profile_updates),
+            "case_results": [item.to_dict() for item in self.case_results],
+        }
+
+
+def _string_tuple(value: Any, *, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    raise TypeError(f"{field_name} must be a string, list, or tuple")
