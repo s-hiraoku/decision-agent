@@ -337,7 +337,7 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertFalse(concept_first_result.verdict_agreement)
         self.assertTrue(concept_first_result.suggested_profile_updates)
 
-    def test_load_evaluation_cases_reports_malformed_jsonl_rows(self) -> None:
+    def test_load_evaluation_cases_reports_invalid_json_rows(self) -> None:
         case = EvaluationCase(
             id="case-1",
             request=ArtifactReviewRequest(
@@ -352,12 +352,32 @@ class DecisionAgentTest(unittest.TestCase):
             case_path = f"{directory}/cases.jsonl"
             with open(case_path, "w", encoding="utf-8") as file:
                 file.write("{bad json}\n")
-                file.write(json.dumps({"id": "bad-shape", "request": {"task_type": "blog_outline"}}))
-                file.write("\n")
                 file.write(json.dumps(case.to_dict(), ensure_ascii=False))
                 file.write("\n")
 
             with self.assertRaisesRegex(ValueError, "malformed evaluation case row 1"):
+                load_evaluation_cases(case_path)
+
+    def test_load_evaluation_cases_reports_invalid_schema_rows(self) -> None:
+        case = EvaluationCase(
+            id="case-1",
+            request=ArtifactReviewRequest(
+                task_type="blog_outline",
+                intent="write about Decision Agent",
+                artifact="A short outline.",
+            ),
+            user_judgment=UserFeedback(verdict="revise", notes="Needs detail."),
+        )
+
+        with TemporaryDirectory() as directory:
+            case_path = f"{directory}/cases.jsonl"
+            with open(case_path, "w", encoding="utf-8") as file:
+                file.write(json.dumps(case.to_dict(), ensure_ascii=False))
+                file.write("\n")
+                file.write(json.dumps({"id": "bad-shape", "request": {"task_type": "blog_outline"}}))
+                file.write("\n")
+
+            with self.assertRaisesRegex(ValueError, "malformed evaluation case row 2"):
                 load_evaluation_cases(case_path)
 
     def test_user_feedback_accepts_scalar_core_issue(self) -> None:
