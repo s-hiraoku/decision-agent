@@ -195,11 +195,11 @@ class ArtifactReview:
 class UserFeedback:
     verdict: str
     notes: str = ""
-    core_issues: tuple[str, ...] = ()
-    revision_direction: str = ""
     preference_rules: tuple[str, ...] = ()
     negative_patterns: tuple[str, ...] = ()
     positive_examples: tuple[str, ...] = ()
+    core_issues: tuple[str, ...] = ()
+    revision_direction: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "UserFeedback":
@@ -209,11 +209,11 @@ class UserFeedback:
         return cls(
             verdict=verdict,
             notes=str(data.get("notes", "")),
-            core_issues=tuple(str(item) for item in data.get("core_issues", [])),
-            revision_direction=str(data.get("revision_direction", "")),
             preference_rules=tuple(str(item) for item in data.get("preference_rules", [])),
             negative_patterns=tuple(str(item) for item in data.get("negative_patterns", [])),
             positive_examples=tuple(str(item) for item in data.get("positive_examples", [])),
+            core_issues=_string_tuple(data.get("core_issues", []), field_name="core_issues"),
+            revision_direction=str(data.get("revision_direction", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -347,3 +347,13 @@ class EvaluationReport:
             "suggested_profile_updates": list(self.suggested_profile_updates),
             "case_results": [item.to_dict() for item in self.case_results],
         }
+
+
+def _string_tuple(value: Any, *, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    raise TypeError(f"{field_name} must be a string, list, or tuple")

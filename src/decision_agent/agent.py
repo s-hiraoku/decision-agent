@@ -210,9 +210,10 @@ class DecisionAgent:
 
         for index, case in enumerate(cases, start=1):
             review = self.review(case.request, history_records=records)
+            review_signal_text = _review_signal_text(review)
             judgment = case.user_judgment
             missed_core_issues = tuple(
-                issue for issue in judgment.core_issues if not _text_matches_review(issue, review)
+                issue for issue in judgment.core_issues if not _text_matches_signal(issue, review_signal_text)
             )
             core_issue_agreement = None
             if judgment.core_issues:
@@ -220,7 +221,10 @@ class DecisionAgent:
 
             revision_direction_agreement = None
             if judgment.revision_direction:
-                revision_direction_agreement = _text_matches_review(judgment.revision_direction, review)
+                revision_direction_agreement = _text_matches_signal(
+                    judgment.revision_direction,
+                    review.revision_instruction,
+                )
 
             suggested_updates = _evaluation_profile_updates(case, review, missed_core_issues)
             results.append(
@@ -382,9 +386,12 @@ def _feedback_delta(agent_review: ArtifactReview, user_feedback: UserFeedback) -
     return f"agent predicted {agent_review.verdict}, user judged {user_feedback.verdict}: {user_feedback.notes}"
 
 
-def _text_matches_review(text: str, review: ArtifactReview) -> bool:
-    review_text = _review_signal_text(review)
-    return text.lower() in review_text or _text_similarity(text, review_text) >= 0.25
+def _text_matches_signal(text: str, signal_text: str) -> bool:
+    candidate = text.strip().lower()
+    if not candidate:
+        return False
+    normalized_signal = signal_text.lower()
+    return candidate in normalized_signal or _text_similarity(candidate, normalized_signal) >= 0.25
 
 
 def _review_signal_text(review: ArtifactReview) -> str:
@@ -407,7 +414,7 @@ def _evaluation_profile_updates(
     for issue in missed_core_issues:
         updates.append(f"for {case.request.task_type}, check whether: {issue}")
 
-    if judgment.revision_direction and not _text_matches_review(judgment.revision_direction, review):
+    if judgment.revision_direction and not _text_matches_signal(judgment.revision_direction, review.revision_instruction):
         updates.append(f"for {case.request.task_type}, prefer revision direction: {judgment.revision_direction}")
 
     return _append_unique((), tuple(updates))

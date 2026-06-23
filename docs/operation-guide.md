@@ -31,6 +31,8 @@ cases/
 
 Do not treat `records` and `cases` as the same thing. Records are the work log.
 Cases are the test set.
+Malformed evaluation case rows fail fast because a truncated test set would make
+accuracy numbers misleading.
 
 ## 1. Review An Artifact
 

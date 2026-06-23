@@ -117,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "evaluate":
         profile = load_profile(args.profile)
         cases = load_evaluation_cases(args.cases)
+        if not cases:
+            parser.error(f"no valid evaluation cases found in: {args.cases}")
         records = load_decision_records(args.records) if args.records else None
         report = DecisionAgent(profile).evaluate(cases, history_records=records)
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))

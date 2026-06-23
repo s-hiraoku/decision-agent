@@ -333,9 +333,11 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(report.cases, 2)
         self.assertEqual(report.verdict_accuracy, 0.5)
         self.assertIn("problem framing is weak", report.common_misses)
-        self.assertTrue(any("prefer revise" in update for update in report.suggested_profile_updates))
+        concept_first_result = next(result for result in report.case_results if result.id == "concept-first")
+        self.assertFalse(concept_first_result.verdict_agreement)
+        self.assertTrue(concept_first_result.suggested_profile_updates)
 
-    def test_load_evaluation_cases_skips_malformed_jsonl_rows(self) -> None:
+    def test_load_evaluation_cases_reports_malformed_jsonl_rows(self) -> None:
         case = EvaluationCase(
             id="case-1",
             request=ArtifactReviewRequest(
@@ -350,13 +352,23 @@ class DecisionAgentTest(unittest.TestCase):
             case_path = f"{directory}/cases.jsonl"
             with open(case_path, "w", encoding="utf-8") as file:
                 file.write("{bad json}\n")
+                file.write(json.dumps({"id": "bad-shape", "request": {"task_type": "blog_outline"}}))
+                file.write("\n")
                 file.write(json.dumps(case.to_dict(), ensure_ascii=False))
                 file.write("\n")
 
-            cases = load_evaluation_cases(case_path)
+            with self.assertRaisesRegex(ValueError, "malformed evaluation case row 1"):
+                load_evaluation_cases(case_path)
 
-        self.assertEqual(len(cases), 1)
-        self.assertEqual(cases[0].id, "case-1")
+    def test_user_feedback_accepts_scalar_core_issue(self) -> None:
+        feedback = UserFeedback.from_dict(
+            {
+                "verdict": "revise",
+                "core_issues": "problem framing is weak",
+            }
+        )
+
+        self.assertEqual(feedback.core_issues, ("problem framing is weak",))
 
 
 if __name__ == "__main__":
