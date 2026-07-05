@@ -25,7 +25,9 @@ The central responsibility is judgment, not generation.
 
 For day-to-day usage, see [Operation Guide](operation-guide.md). This document
 defines the data model and behavior; the operation guide explains how to run the
-review, iteration, and evaluation loop.
+review, iteration, and evaluation loop. For the implementation-level design that
+closes the gaps listed under "Still incomplete" (LLM-backed review, rule
+extraction, semantic evaluation), see [Detailed Design](detailed-design.md).
 
 ## Core Concept
 
