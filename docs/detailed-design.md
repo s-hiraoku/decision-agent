@@ -16,7 +16,7 @@
 |---|---------|------------|
 | G1 | LLM ベースのレビュー | `ReviewEngine` 抽象化 + `LLMReviewEngine`(§4, §5) |
 | G2 | 自由記述フィードバックからの耐久的ルール抽出 | LLM による候補ルール抽出 + ユーザー承認フロー(§6) |
-| G3 | 評価のセマンティックマッチング | LLM ジャッジによる一致判定 + 決定的フォールバック(§7) |
+| G3 | 評価のセマンティックマッチング | LLM ジャッジによる一致判定 + heuristic 側の文字 n-gram 化(§7) |
 | G4 | 生成エージェントとのオーケストレーション | Revise ループの JSON 契約定義(§8。実装は契約のみ、生成側は非スコープ) |
 | G5 | 数値スコアでない、ユーザー整合の判断最適化 | ルールの構造化(provenance / status / 実績カウント)と評価駆動の昇格・降格(§3, §6) |
 
@@ -419,6 +419,69 @@ LLM ジャッジ導入により evaluate は非決定的になる。レポート
   明示指定した場合のみ hit/miss カウントを書き戻す(ルールの追加・削除・status 変更は
   この経路でも行わない)。
 
+### 7.5 heuristic エンジンの日本語対応(LLM 不要経路)
+
+§7.1〜7.4 は `--engine llm` を前提にした解決だが、§1.2 の設計原則 3 が
+「LLM なしでも全コマンドが動作する」と定めている以上、既定の `heuristic` エンジンでも
+日本語プロファイル・日本語 artifact が最低限機能する必要がある。現状はここが未解決。
+
+**現状の問題:** `review` の判定に使う `_text_similarity` / `_matched_items` /
+`_relevant_records` はすべて `\w+` によるトークン化(`engines/heuristic.py` へ
+移設後も同じロジック)を土台にしており、空白で分かち書きされない日本語では
+文またはフレーズ全体が 1 トークンになる。結果として:
+
+- `known_mistakes` の照合(閾値 0.2)、`preference_rules` / `negative_patterns` の
+  照合(閾値 0.34)が、日本語入力では完全一致以外ほぼ発火しない
+- `_relevant_records` の履歴類似度ランキングが日本語では機能せず、
+  `learned_signals` に載る「使った過去レコード」が実質ランダムになる
+- 仕様書(`decision-agent-spec.md`)のレビュー入出力例は日本語だが、
+  そのサンプルをそのまま heuristic エンジンに通しても、ルール照合・履歴参照が
+  意図どおりに働かない
+
+`--engine llm` を使えばこの問題は AgreementJudge 側では回避できるが、それは
+**evaluate の一致判定**に限った話であり、`review` 本体の日本語プロファイル照合
+(known_mistakes、preference_rules、negative_patterns、履歴類似度)は
+heuristic 経路である限り LLM の有無に関わらず影響を受ける
+(`review` の既定エンジンは §2.2 のとおり heuristic のままなので、
+API キーを持たないユーザーの主要な利用経路がこれに当たる)。
+
+**設計方針:** `engines/heuristic.py` の文字列比較を、依存ゼロで動く
+文字 n-gram Jaccard 係数に置き換える。
+
+```python
+def _char_ngrams(text: str, n: int = 2) -> set[str]:
+    normalized = re.sub(r"\s+", "", text.lower())
+    if len(normalized) < n:
+        return {normalized} if normalized else set()
+    return {normalized[i : i + n] for i in range(len(normalized) - n + 1)}
+
+def _ngram_similarity(left: str, right: str) -> float:
+    left_grams, right_grams = _char_ngrams(left), _char_ngrams(right)
+    if not left_grams or not right_grams:
+        return 0.0
+    return len(left_grams & right_grams) / len(left_grams | right_grams)
+```
+
+- 文字 2-gram は言語非依存で、日本語・英語のどちらでも最低限の部分一致を検出できる
+  (既存の英語向けトークン一致は特殊ケースとして包含される)。
+- `_text_similarity`(`containment` 用途: パターンが本文にどれだけ現れるか)と
+  `_ngram_similarity`(対称的な類似度)は用途が異なるため、
+  `engines/heuristic.py` 内で別関数として残す。既存の呼び出し箇所
+  (known_mistakes 照合 0.2、preference_rules/negative_patterns 照合 0.34、
+  履歴類似度、`_text_matches_signal` 0.25)を n-gram 版に差し替えるが、
+  各閾値は英語コーパスで調整された値なので、置き換え後に
+  `examples/blog-outline-cases.jsonl` 相当の日本語ケースで再チューニングする
+  (Phase 2 のテストで検証する)。
+- 形態素解析(`sudachipy` 等)への発展は本書のスコープ外とする。
+  文字 n-gram は依存ゼロで §1.2 原則 3 を満たす最小限の改善であり、
+  単語単位の精度が必要になった場合は `[ja]` extra として別途検討する。
+
+**適用範囲:** この変更は `engines/heuristic.py` 内のプライベート関数の置き換えのみで、
+`ReviewEngine` / `AgreementJudge` の外部契約(§2.2)には影響しない。
+Phase 1(§11)の「既存ロジックを `engines/heuristic.py` へ移設」の直後、
+Phase 2 着手前に行うのが最小コストになる
+(移設後に置き換えれば、移設自体は純粋なコード移動のまま検証できる)。
+
 ## 8. 生成エージェント連携(Revise ループ契約)
 
 Decision Agent 側は「レビュー結果を生成エージェントに返す」ための JSON 契約だけ定義する。
@@ -503,8 +566,9 @@ decide / train   # 既存のまま(凍結)
 
 1. `engines/` パッケージ作成、Protocol 定義
 2. 既存レビューロジックを `engines/heuristic.py` へ移設、`DecisionAgent` を委譲構造に変更
-3. CLI に `--engine` を追加(heuristic のみ受理)
-4. 既存テスト全通過を確認
+3. 文字 n-gram によるテキスト一致判定への置き換え(§7.5)、日本語ケースでの閾値再調整
+4. CLI に `--engine` を追加(heuristic のみ受理)
+5. 既存テスト全通過を確認
 
 ### Phase 2: データモデル拡張
 
