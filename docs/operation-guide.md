@@ -42,8 +42,14 @@ Run a review before showing the user judgment to the agent.
 PYTHONPATH=src python -m decision_agent.cli review \
   profiles/default.json \
   requests/blog-outline-request.json \
-  --records records/blog_outline.jsonl
+  --records records/blog_outline.jsonl \
+  --engine heuristic
 ```
+
+`heuristic` is the only implemented engine today. It is deterministic, requires
+no API key, and records `"engine": "heuristic"` in review output. The LLM engine
+is specified in [detailed-design.md](detailed-design.md), but `--engine llm`
+currently fails fast so review records do not silently mix engine behavior.
 
 The output contains:
 
@@ -51,6 +57,7 @@ The output contains:
 - `issues`: reasons and suggestions
 - `revision_instruction`: the next direction to send back into the loop
 - `learned_signals`: which stored rules or records influenced the review
+- `engine`: which review engine produced the judgment
 
 ## 2. Capture User Judgment
 
@@ -104,7 +111,8 @@ After collecting several examples, evaluate the agent against fixed cases.
 PYTHONPATH=src python -m decision_agent.cli evaluate \
   profiles/default.json \
   cases/blog_outline_cases.jsonl \
-  --records records/blog_outline.jsonl
+  --records records/blog_outline.jsonl \
+  --engine heuristic
 ```
 
 The report includes:

@@ -140,6 +140,7 @@ class ReviewIssue:
     severity: str
     reason: str
     suggestion: str
+    violated_rule_id: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewIssue":
@@ -147,6 +148,7 @@ class ReviewIssue:
             severity=str(data.get("severity", "medium")),
             reason=str(data.get("reason", "")),
             suggestion=str(data.get("suggestion", "")),
+            violated_rule_id=str(data.get("violated_rule_id", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -154,6 +156,7 @@ class ReviewIssue:
             "severity": self.severity,
             "reason": self.reason,
             "suggestion": self.suggestion,
+            "violated_rule_id": self.violated_rule_id,
         }
 
 
@@ -165,6 +168,7 @@ class ArtifactReview:
     issues: tuple[ReviewIssue, ...] = ()
     revision_instruction: str = ""
     learned_signals: tuple[str, ...] = ()
+    engine: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ArtifactReview":
@@ -178,6 +182,7 @@ class ArtifactReview:
             issues=tuple(ReviewIssue.from_dict(item) for item in data.get("issues", [])),
             revision_instruction=str(data.get("revision_instruction", "")),
             learned_signals=tuple(str(item) for item in data.get("learned_signals", [])),
+            engine=str(data.get("engine", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -188,6 +193,7 @@ class ArtifactReview:
             "issues": [item.to_dict() for item in self.issues],
             "revision_instruction": self.revision_instruction,
             "learned_signals": list(self.learned_signals),
+            "engine": self.engine,
         }
 
 

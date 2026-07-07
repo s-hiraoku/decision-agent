@@ -336,24 +336,29 @@ Implemented first steps:
 
 - `ArtifactReviewRequest`, `ArtifactReview`, `ReviewIssue`, `UserFeedback`, and
   `DecisionRecord` models
+- review engine abstraction with the deterministic `heuristic` engine as the
+  current default
 - natural-language preference rules, negative patterns, and positive examples on
   the profile
 - known mistakes promoted from verdict deltas
 - `review` CLI behavior that returns verdict, issues, revision instruction, and
-  learned signals
+  learned signals, including the producing `engine`
 - `learn` CLI behavior that stores feedback deltas, appends JSONL records, and
   updates the local profile
 - `iterate` CLI behavior that reviews, learns, updates the profile, and appends
   the raw record in one pass
 - `evaluate` CLI behavior that reports verdict, core issue, and revision
   direction alignment
+- dependency-free Japanese/mixed-text heuristic matching using character n-gram
+  containment in addition to English-like token containment
 
 Still incomplete:
 
 - orchestration around generator agents before the review step
-- LLM-backed review over richer natural-language criteria
+- LLM-backed review over richer natural-language criteria; `--engine llm` is
+  specified but not implemented yet
 - stronger extraction of durable preference rules from free-form feedback
-- stronger semantic matching for evaluation beyond simple text similarity
+- stronger semantic matching for evaluation beyond heuristic text similarity
 - deeper optimization for user-aligned judgment, not only numeric scoring
 
 ## Success Criteria

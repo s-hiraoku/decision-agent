@@ -1,8 +1,11 @@
 import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from tempfile import TemporaryDirectory
 
 from decision_agent.agent import DecisionAgent
+from decision_agent.cli import main as cli_main
 from decision_agent.models import (
     Alternative,
     ArtifactReviewRequest,
@@ -11,6 +14,7 @@ from decision_agent.models import (
     DecisionProfile,
     DecisionRecord,
     EvaluationCase,
+    ReviewIssue,
     UserFeedback,
 )
 from decision_agent.storage import append_decision_record, load_decision_records, load_evaluation_cases
@@ -102,8 +106,51 @@ class DecisionAgentTest(unittest.TestCase):
         review = DecisionAgent(profile).review(request)
 
         self.assertEqual(review.verdict, "revise")
+        self.assertEqual(review.engine, "heuristic")
         self.assertTrue(review.issues)
         self.assertIn("revise", review.revision_instruction)
+
+    def test_review_issue_and_engine_fields_are_backward_compatible(self) -> None:
+        review = ArtifactReview.from_dict(
+            {
+                "verdict": "revise",
+                "confidence": 0.6,
+                "summary": "needs work",
+                "issues": [{"severity": "medium", "reason": "missing hook", "suggestion": "add one"}],
+            }
+        )
+
+        self.assertEqual(review.engine, "")
+        self.assertEqual(review.issues[0].violated_rule_id, "")
+        self.assertEqual(
+            ReviewIssue(
+                severity="high",
+                reason="violates rule",
+                suggestion="fix it",
+                violated_rule_id="rule-1",
+            ).to_dict()["violated_rule_id"],
+            "rule-1",
+        )
+
+    def test_review_matches_japanese_negative_pattern_without_exact_substring(self) -> None:
+        profile = DecisionProfile(
+            user_id="u1",
+            criteria={},
+            negative_patterns=("抽象概念を先に説明",),
+        )
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="Decision Agent の構想を技術ブログにしたい",
+            artifact=(
+                "この記事は、最初に抽象的な概念説明が先に来て、そのあとで利用者の困りごとを説明する。"
+                "さらに、判断履歴、フィードバック差分、評価ケースを紹介し、最後に改善ループの流れを述べる。"
+                "読者にとっては構造は理解できるが、冒頭でなぜ必要なのかを実感しにくい構成になっている。"
+            ),
+        )
+
+        review = DecisionAgent(profile).review(request)
+
+        self.assertTrue(any("抽象概念を先に説明" in issue.reason for issue in review.issues))
 
     def test_learn_records_feedback_and_updates_profile(self) -> None:
         profile = DecisionProfile(user_id="u1", criteria={})
@@ -389,6 +436,35 @@ class DecisionAgentTest(unittest.TestCase):
         )
 
         self.assertEqual(feedback.core_issues, ("problem framing is weak",))
+
+    def test_cli_accepts_heuristic_engine_and_rejects_llm_for_now(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            request_path = f"{directory}/request.json"
+            with open(profile_path, "w", encoding="utf-8") as file:
+                json.dump({"user_id": "u1", "criteria": {}}, file)
+            with open(request_path, "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "task_type": "blog_outline",
+                        "intent": "write about Decision Agent",
+                        "artifact": "A short outline about Decision Agent.",
+                    },
+                    file,
+                )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = cli_main(["review", profile_path, request_path, "--engine", "heuristic"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["engine"], "heuristic")
+
+            stderr = StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(stderr):
+                cli_main(["review", profile_path, request_path, "--engine", "llm"])
+
+            self.assertIn("only the heuristic engine is implemented", stderr.getvalue())
 
 
 if __name__ == "__main__":

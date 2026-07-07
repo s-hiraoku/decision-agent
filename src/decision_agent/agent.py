@@ -8,6 +8,8 @@ import math
 import re
 import uuid
 
+from decision_agent.engines import AgreementJudge, ReviewEngine
+from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
 from decision_agent.models import (
     Alternative,
     ArtifactReview,
@@ -20,21 +22,26 @@ from decision_agent.models import (
     EvaluationCaseResult,
     EvaluationReport,
     KnownMistake,
-    ReviewIssue,
+    SUPPORTED_VERDICTS,
     UserFeedback,
 )
 
 ATTRIBUTE_SCALE = 10.0
 MEMORY_WEIGHT = 0.25
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
-REVIEW_TOKEN_RE = re.compile(r"\w+")
-MIN_USEFUL_ARTIFACT_LENGTH = 120
-HISTORY_MATCH_LIMIT = 3
 
 
 class DecisionAgent:
-    def __init__(self, profile: DecisionProfile):
+    def __init__(
+        self,
+        profile: DecisionProfile,
+        *,
+        review_engine: ReviewEngine | None = None,
+        agreement_judge: AgreementJudge | None = None,
+    ):
         self.profile = profile
+        self.review_engine = review_engine or HeuristicReviewEngine()
+        self.agreement_judge = agreement_judge or HeuristicAgreementJudge()
 
     def decide(self, context: str, alternatives: list[Alternative]) -> DecisionResult:
         if not self.profile.criteria:
@@ -93,87 +100,12 @@ class DecisionAgent:
         request: ArtifactReviewRequest,
         history_records: tuple[DecisionRecord, ...] | None = None,
     ) -> ArtifactReview:
-        text = _review_text(request)
-        issues: list[ReviewIssue] = []
         records = self.profile.decision_records if history_records is None else history_records
-        relevant_records = _relevant_records(request, records)
-
-        if len(request.artifact.strip()) < MIN_USEFUL_ARTIFACT_LENGTH:
-            issues.append(
-                ReviewIssue(
-                    severity="medium",
-                    reason="artifact is too short to evaluate the user's judgment criteria reliably",
-                    suggestion="add enough outline, script, or draft detail before asking for a final judgment",
-                )
-            )
-
-        for mistake in self.profile.known_mistakes:
-            if _text_similarity(mistake.pattern, text) >= 0.2:
-                issues.append(
-                    ReviewIssue(
-                        severity="high",
-                        reason=f"resembles known mistake: {mistake.pattern}",
-                        suggestion=mistake.correction,
-                    )
-                )
-
-        for record in relevant_records[:HISTORY_MATCH_LIMIT]:
-            rejected_before = record.user_feedback.verdict in {"revise", "reject"}
-            similar_artifact = _text_similarity(record.request.artifact, text) >= 0.2
-            if rejected_before and similar_artifact:
-                issues.append(
-                    ReviewIssue(
-                        severity="medium",
-                        reason=f"similar past artifact was judged {record.user_feedback.verdict}: {record.user_feedback.notes}",
-                        suggestion="compare against the past feedback before accepting this artifact",
-                    )
-                )
-
-        negative_matches = _matched_items(self.profile.negative_patterns, text)
-        for pattern in negative_matches:
-            issues.append(
-                ReviewIssue(
-                    severity="high",
-                    reason=f"matches a negative pattern: {pattern}",
-                    suggestion="revise the artifact so this pattern is removed or explicitly justified",
-                )
-            )
-
-        matched_rules = _matched_items(self.profile.preference_rules, text)
-        missing_rules = [rule for rule in self.profile.preference_rules if rule not in matched_rules]
-        for rule in missing_rules[:2]:
-            issues.append(
-                ReviewIssue(
-                    severity="medium",
-                    reason=f"does not clearly satisfy preference rule: {rule}",
-                    suggestion="revise the artifact to make this preference visible in the structure or wording",
-                )
-            )
-
-        positive_matches = _matched_items(self.profile.positive_examples, text)
-        if len([issue for issue in issues if issue.severity == "high"]) >= 2:
-            verdict = "reject"
-        elif issues:
-            verdict = "revise"
-        else:
-            verdict = "accept"
-
-        confidence = _review_confidence(issues, matched_rules, positive_matches)
-        summary = _review_summary(verdict, issues, matched_rules, positive_matches)
-        revision_instruction = _revision_instruction(verdict, issues)
-        learned_signals = (
-            *(f"checked preference rule: {rule}" for rule in matched_rules[:3]),
-            *(f"used past record: {record.id}" for record in relevant_records[:2] if record.id),
-        )
-
-        return ArtifactReview(
-            verdict=verdict,
-            confidence=confidence,
-            summary=summary,
-            issues=tuple(issues),
-            revision_instruction=revision_instruction,
-            learned_signals=learned_signals,
-        )
+        review = self.review_engine.review(request, self.profile, records)
+        if review.verdict not in SUPPORTED_VERDICTS:
+            raise ValueError(f"unsupported verdict: {review.verdict}")
+        engine_name = review.engine or getattr(self.review_engine, "name", "")
+        return replace(review, confidence=max(0.0, min(1.0, review.confidence)), engine=engine_name)
 
     def learn(
         self,
@@ -210,23 +142,21 @@ class DecisionAgent:
 
         for index, case in enumerate(cases, start=1):
             review = self.review(case.request, history_records=records)
-            review_signal_text = _review_signal_text(review)
             judgment = case.user_judgment
-            missed_core_issues = tuple(
-                issue for issue in judgment.core_issues if not _text_matches_signal(issue, review_signal_text)
-            )
+            agreement = self.agreement_judge.judge(judgment, review)
+            missed_core_issues = tuple(result.issue for result in agreement.core_issues if not result.noticed)
             core_issue_agreement = None
             if judgment.core_issues:
                 core_issue_agreement = len(missed_core_issues) == 0
 
-            revision_direction_agreement = None
-            if judgment.revision_direction:
-                revision_direction_agreement = _text_matches_signal(
-                    judgment.revision_direction,
-                    review.revision_instruction,
-                )
+            revision_direction_agreement = agreement.revision_direction_match
 
-            suggested_updates = _evaluation_profile_updates(case, review, missed_core_issues)
+            suggested_updates = _evaluation_profile_updates(
+                case,
+                review,
+                missed_core_issues,
+                revision_direction_agreement,
+            )
             results.append(
                 EvaluationCaseResult(
                     id=case.id or f"case-{index}",
@@ -326,83 +256,17 @@ def _token_similarity(left: str, right: str) -> float:
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
-def _review_text(request: ArtifactReviewRequest) -> str:
-    context = " ".join(request.context.values())
-    return f"{request.task_type} {request.intent} {context} {request.artifact}".lower()
-
-
-def _matched_items(items: tuple[str, ...], text: str) -> list[str]:
-    return [item for item in items if _text_similarity(item, text) >= 0.34 or item.lower() in text]
-
-
-def _text_similarity(left: str, right: str) -> float:
-    left_tokens = _review_tokens(left)
-    right_tokens = _review_tokens(right)
-    if not left_tokens or not right_tokens:
-        return 0.0
-    return len(left_tokens & right_tokens) / len(left_tokens)
-
-
-def _review_tokens(text: str) -> set[str]:
-    return {token.lower() for token in REVIEW_TOKEN_RE.findall(text) if len(token) > 2}
-
-
-def _review_confidence(
-    issues: list[ReviewIssue],
-    matched_rules: list[str],
-    positive_matches: list[str],
-) -> float:
-    score = 0.45 + 0.08 * len(matched_rules) + 0.05 * len(positive_matches) + 0.04 * len(issues)
-    return round(max(0.2, min(0.9, score)), 2)
-
-
-def _review_summary(
-    verdict: str,
-    issues: list[ReviewIssue],
-    matched_rules: list[str],
-    positive_matches: list[str],
-) -> str:
-    if verdict == "accept":
-        return "artifact appears aligned with the stored user preference profile"
-    if matched_rules or positive_matches:
-        return "artifact has some alignment, but stored preferences indicate revisions are needed"
-    if issues:
-        return "artifact needs revision before it matches the stored user judgment profile"
-    return "not enough preference evidence is available for a strong judgment"
-
-
-def _revision_instruction(verdict: str, issues: list[ReviewIssue]) -> str:
-    if verdict == "accept":
-        return "keep the current direction"
-    if not issues:
-        return "ask the user for feedback and record the judgment delta"
-    suggestions = _append_unique((), tuple(issue.suggestion for issue in issues))
-    return " ".join(f"{suggestion}." for suggestion in suggestions[:3])
-
-
 def _feedback_delta(agent_review: ArtifactReview, user_feedback: UserFeedback) -> str:
     if agent_review.verdict == user_feedback.verdict:
         return "agent verdict matched user feedback"
     return f"agent predicted {agent_review.verdict}, user judged {user_feedback.verdict}: {user_feedback.notes}"
 
 
-def _text_matches_signal(text: str, signal_text: str) -> bool:
-    candidate = text.strip().lower()
-    if not candidate:
-        return False
-    normalized_signal = signal_text.lower()
-    return candidate in normalized_signal or _text_similarity(candidate, normalized_signal) >= 0.25
-
-
-def _review_signal_text(review: ArtifactReview) -> str:
-    issue_text = " ".join(f"{issue.reason} {issue.suggestion}" for issue in review.issues)
-    return f"{review.summary} {review.revision_instruction} {issue_text} {' '.join(review.learned_signals)}".lower()
-
-
 def _evaluation_profile_updates(
     case: EvaluationCase,
     review: ArtifactReview,
     missed_core_issues: tuple[str, ...],
+    revision_direction_agreement: bool | None,
 ) -> tuple[str, ...]:
     updates: list[str] = []
     judgment = case.user_judgment
@@ -414,7 +278,7 @@ def _evaluation_profile_updates(
     for issue in missed_core_issues:
         updates.append(f"for {case.request.task_type}, check whether: {issue}")
 
-    if judgment.revision_direction and not _text_matches_signal(judgment.revision_direction, review.revision_instruction):
+    if judgment.revision_direction and revision_direction_agreement is False:
         updates.append(f"for {case.request.task_type}, prefer revision direction: {judgment.revision_direction}")
 
     return _append_unique((), tuple(updates))
@@ -451,22 +315,6 @@ def _record_id(request: ArtifactReviewRequest) -> str:
     intent_tokens = [token.lower() for token in TOKEN_RE.findall(request.intent) if len(token) > 2]
     intent = "-".join(sorted(intent_tokens)[:4]) or "review"
     return f"{timestamp}-{request.task_type}-{intent}-{uuid.uuid4().hex[:8]}"
-
-
-def _relevant_records(
-    request: ArtifactReviewRequest,
-    records: tuple[DecisionRecord, ...],
-) -> list[DecisionRecord]:
-    same_task = [record for record in records if record.request.task_type == request.task_type]
-    return sorted(
-        same_task,
-        key=lambda record: (
-            _text_similarity(request.artifact, record.request.artifact),
-            _text_similarity(request.intent, record.request.intent),
-            record.created_at,
-        ),
-        reverse=True,
-    )
 
 
 def _update_known_mistakes(

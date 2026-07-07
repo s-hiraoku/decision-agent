@@ -35,6 +35,20 @@ Review an artifact:
 PYTHONPATH=src python -m decision_agent.cli review examples/review-profile.json examples/review-request.json
 ```
 
+The default review engine is `heuristic`, which is deterministic and does not
+require an API key. It can also be selected explicitly:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli review \
+  examples/review-profile.json \
+  examples/review-request.json \
+  --engine heuristic
+```
+
+The `llm` engine is defined in the detailed design but is not implemented yet;
+passing `--engine llm` fails fast instead of silently falling back to heuristic
+behavior.
+
 Review with past records:
 
 ```bash
@@ -78,9 +92,10 @@ PYTHONPATH=src python -m decision_agent.cli evaluate \
 ```
 
 The review path is intentionally simple for now: it checks the artifact against
-stored natural-language rules, known mistakes, and same-task history. Feedback is
-preserved as append-only JSONL records so later iterations can become more
-user-aligned.
+stored natural-language rules, known mistakes, and same-task history. The
+heuristic matcher uses token containment for English-like text and a dependency-free
+character n-gram fallback for Japanese or mixed text. Feedback is preserved as
+append-only JSONL records so later iterations can become more user-aligned.
 
 See [docs/operation-guide.md](docs/operation-guide.md) for the intended operating
 loop: review, capture user judgment, iterate, evaluate, then update the profile
