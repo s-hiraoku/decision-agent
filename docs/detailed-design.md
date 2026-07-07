@@ -278,13 +278,21 @@ class DecisionProfile:
 (criteria / rules 等)だけを読む。埋もれていた履歴を失わずに JSONL へ
 移すため、1 回限りの移行コマンドを提供する。
 
+移行コマンドは通常の `DecisionProfile.from_dict` とは別に、旧 JSON から
+`decision_records` を直接読む legacy loader を使う。これにより、通常のプロファイル
+モデルが履歴を無視する状態になっても、移行前の埋め込み履歴を失わない。
+
 ```bash
 decision-agent migrate-history <old-profile.json> --records <records.jsonl>
 ```
 
 - 旧プロファイル内の `decision_records` を読み、`records.jsonl` に
-  (重複する `id` を除いて)追記する。
-- 完了後のプロファイルは `decision_records` を持たない形で保存し直す。
+  追記する。
+- JSONL への追記は `id` ではなく、`request` / `agent_review` / `user_feedback` /
+  `delta` から作る論理 fingerprint で重複判定する。`_record_id` は呼び出しごとに
+  変わるため、`id` だけで dedupe すると、プロファイル保存失敗後の再実行で同じ
+  feedback が二重 append される。
+- 完了後のプロファイルは `decision_records` の中身を空にして保存し直す。
 - Phase 2(§11)にこの移行コマンドの追加を含める。
 
 ### 3.6 task_type の拡張方法
