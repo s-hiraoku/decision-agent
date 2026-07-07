@@ -65,6 +65,18 @@ PYTHONPATH=src python -m decision_agent.cli rules reject profiles/default.json r
 PYTHONPATH=src python -m decision_agent.cli rules retire profiles/default.json rule-...
 ```
 
+Move legacy embedded profile history into JSONL:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli migrate-history \
+  profiles/old-profile.json \
+  --records records/blog_outline.jsonl
+```
+
+The migration path reads raw `decision_records` from old profile JSON before the
+normal profile model drops embedded history, and JSONL appends skip duplicate
+logical records so reruns are safe.
+
 Review with past records:
 
 ```bash

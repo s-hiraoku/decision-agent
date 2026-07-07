@@ -14,6 +14,7 @@ from decision_agent.storage import (
     load_decision_records,
     load_evaluation_cases,
     load_feedback,
+    load_legacy_profile_decision_records,
     load_profile,
     load_request,
     load_review,
@@ -80,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
         command_parser.add_argument("profile", type=Path)
         command_parser.add_argument("rule_id")
         command_parser.add_argument("--output", "-o", type=Path)
+
+    migrate_parser = subcommands.add_parser("migrate-history", help="Move legacy embedded profile records to JSONL.")
+    migrate_parser.add_argument("profile", type=Path)
+    migrate_parser.add_argument("--records", type=Path, required=True)
+    migrate_parser.add_argument("--output", "-o", type=Path)
 
     args = parser.parse_args(argv)
 
@@ -176,6 +182,13 @@ def main(argv: list[str] | None = None) -> int:
 
         updated = _update_rule(profile, args.rule_id, args.rules_command, parser)
         save_profile(updated, args.output or args.profile)
+        return 0
+
+    if args.command == "migrate-history":
+        profile = load_profile(args.profile)
+        for record in load_legacy_profile_decision_records(args.profile):
+            append_decision_record(args.records, record)
+        save_profile(replace(profile, decision_records=()), args.output or args.profile)
         return 0
 
     parser.error(f"unknown command: {args.command}")

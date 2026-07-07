@@ -154,6 +154,51 @@ class DecisionAgentTest(unittest.TestCase):
 
         self.assertTrue(any("抽象概念を先に説明" in issue.reason for issue in review.issues))
 
+    def test_short_japanese_pattern_does_not_overmatch(self) -> None:
+        profile = DecisionProfile(
+            user_id="u1",
+            criteria={},
+            negative_patterns=("注意",),
+        )
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="Decision Agent の構想を技術ブログにしたい",
+            artifact=(
+                "記事の冒頭では導入を置き、その後で判断履歴と評価ケースを説明する。"
+                "実装例と運用方法も含めて、読者が次の作業に進めるだけの情報を入れる。"
+                "全体として十分な長さがあり、短い断片だけで否定判定されるべきではない。"
+            ),
+        )
+
+        review = DecisionAgent(profile).review(request)
+
+        self.assertFalse(any("注意" in issue.reason for issue in review.issues))
+
+    def test_japanese_agreement_evidence_uses_char_fallback(self) -> None:
+        review = DecisionAgent(
+            DecisionProfile(
+                user_id="u1",
+                criteria={},
+                negative_patterns=("抽象概念を先に説明",),
+            )
+        ).review(
+            ArtifactReviewRequest(
+                task_type="blog_outline",
+                intent="Decision Agent の構想を技術ブログにしたい",
+                artifact=(
+                    "この記事は、抽象的な概念説明が先に来る。"
+                    "その後で利用者の困りごと、判断履歴、評価ケースを説明する。"
+                    "十分な長さはあるが、冒頭の問題提示が弱い。"
+                ),
+            )
+        )
+        feedback = UserFeedback(verdict="revise", core_issues=("抽象概念を先に説明",))
+
+        result = DecisionAgent(DecisionProfile(user_id="u1", criteria={})).agreement_judge.judge(feedback, review)
+
+        self.assertTrue(result.core_issues[0].noticed)
+        self.assertTrue(result.core_issues[0].evidence)
+
     def test_profile_loads_legacy_string_rules_as_structured_entries(self) -> None:
         first = DecisionProfile.from_dict(
             {
@@ -355,6 +400,41 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].request.task_type, "blog_outline")
         self.assertEqual(records[0].user_feedback.notes, "Needs a sharper opening.")
+
+    def test_append_decision_record_skips_logical_duplicates(self) -> None:
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        review = ArtifactReview(verdict="revise", confidence=0.5, summary="needs work")
+        feedback = UserFeedback(verdict="revise", notes="Needs a sharper opening.")
+        first = DecisionRecord(
+            request=request,
+            agent_review=review,
+            user_feedback=feedback,
+            delta="agent verdict matched user feedback",
+            id="first",
+            created_at="2026-01-01T00:00:00Z",
+        )
+        second = DecisionRecord(
+            request=request,
+            agent_review=review,
+            user_feedback=feedback,
+            delta="agent verdict matched user feedback",
+            id="second",
+            created_at="2026-01-01T00:01:00Z",
+        )
+
+        with TemporaryDirectory() as directory:
+            record_path = f"{directory}/blog_outline.jsonl"
+            append_decision_record(record_path, first)
+            append_decision_record(record_path, second)
+
+            records = load_decision_records(record_path)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].id, "first")
 
     def test_record_ids_are_unique_for_repeated_learns(self) -> None:
         profile = DecisionProfile(user_id="u1", criteria={})
@@ -561,6 +641,44 @@ class DecisionAgentTest(unittest.TestCase):
                 updated = DecisionProfile.from_dict(json.load(file))
 
         self.assertEqual(updated.preference_rules, ())
+
+    def test_migrate_history_moves_legacy_profile_records_to_jsonl(self) -> None:
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        record = DecisionRecord(
+            request=request,
+            agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+            user_feedback=UserFeedback(verdict="revise", notes="Needs a sharper opening."),
+            delta="agent verdict matched user feedback",
+            id="legacy-record",
+        )
+
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            records_path = f"{directory}/records.jsonl"
+            with open(profile_path, "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "user_id": "u1",
+                        "criteria": {},
+                        "decision_records": [record.to_dict()],
+                    },
+                    file,
+                )
+
+            self.assertEqual(cli_main(["migrate-history", profile_path, "--records", records_path]), 0)
+            self.assertEqual(cli_main(["migrate-history", profile_path, "--records", records_path]), 0)
+
+            records = load_decision_records(records_path)
+            with open(profile_path, encoding="utf-8") as file:
+                migrated_profile = DecisionProfile.from_dict(json.load(file))
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].id, "legacy-record")
+        self.assertEqual(migrated_profile.decision_records, ())
 
 
 if __name__ == "__main__":

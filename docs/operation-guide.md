@@ -38,6 +38,18 @@ Cases are the test set.
 Malformed evaluation case rows fail fast because a truncated test set would make
 accuracy numbers misleading.
 
+If an old profile contains embedded `decision_records`, migrate them once:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli migrate-history \
+  profiles/old-profile.json \
+  --records records/blog_outline.jsonl
+```
+
+The command reads the legacy embedded rows directly from the old JSON, appends
+them to JSONL, and saves the profile without embedded history. Re-running the
+command is safe because JSONL appends skip duplicate logical records.
+
 ## 1. Review An Artifact
 
 Run a review before showing the user judgment to the agent.

@@ -19,6 +19,8 @@ ASCII_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 SIGNAL_TOKEN_RE = re.compile(r"\w+")
 MIN_USEFUL_ARTIFACT_LENGTH = 120
 HISTORY_MATCH_LIMIT = 3
+MIN_NON_ASCII_CHAR_NGRAM_LENGTH = 4
+MIN_CHAR_UNIT_OVERLAP = 3
 
 
 class HeuristicReviewEngine:
@@ -191,11 +193,16 @@ def _ascii_tokens(text: str) -> set[str]:
 def _char_ngram_containment(left: str, right: str) -> float:
     if not (_contains_non_ascii(left) or _contains_non_ascii(right)):
         return 0.0
+    if len(re.sub(r"\s+", "", left)) < MIN_NON_ASCII_CHAR_NGRAM_LENGTH:
+        return 0.0
     left_units = _char_units(left)
     right_units = _char_units(right)
     if not left_units or not right_units:
         return 0.0
-    return len(left_units & right_units) / len(left_units)
+    overlap = left_units & right_units
+    if len(overlap) < MIN_CHAR_UNIT_OVERLAP:
+        return 0.0
+    return len(overlap) / len(left_units)
 
 
 def _char_units(text: str) -> set[str]:
@@ -278,11 +285,39 @@ def _matched_evidence(pattern: str, text: str) -> str:
     pattern_tokens = _signal_tokens(normalized_pattern)
     text_tokens = _signal_tokens(normalized_text)
     overlap = tuple(token for token in pattern_tokens if token in text_tokens)
-    return " ".join(overlap[:8])
+    if overlap:
+        return " ".join(overlap[:8])
+    return _char_evidence(normalized_pattern, normalized_text)
 
 
 def _signal_tokens(text: str) -> tuple[str, ...]:
     return tuple(token.lower() for token in SIGNAL_TOKEN_RE.findall(text) if len(token) > 2)
+
+
+def _char_evidence(pattern: str, text: str) -> str:
+    if text_similarity(pattern, text) < 0.25:
+        return ""
+    text_units = _char_units(text)
+    overlap = [unit for unit in _ordered_char_units(pattern) if unit in text_units]
+    return " ".join(overlap[:8])
+
+
+def _ordered_char_units(text: str) -> tuple[str, ...]:
+    compact = re.sub(r"\s+", "", text.lower())
+    values: list[str] = []
+    if _contains_non_ascii(compact):
+        values.extend(char for char in compact if _is_meaningful_char(char))
+    for size in (2, 3):
+        if len(compact) >= size:
+            values.extend(compact[index : index + size] for index in range(len(compact) - size + 1))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value not in seen:
+            deduped.append(value)
+            seen.add(value)
+    return tuple(deduped)
 
 
 def _normalize(text: str) -> str:
