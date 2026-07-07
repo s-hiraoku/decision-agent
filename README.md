@@ -49,6 +49,22 @@ The `llm` engine is defined in the detailed design but is not implemented yet;
 passing `--engine llm` fails fast instead of silently falling back to heuristic
 behavior.
 
+List profile rules and patterns:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli rules list examples/review-profile.json --json
+```
+
+Profiles accept the legacy string form, but saving a profile now writes
+structured rule objects with stable IDs, status, provenance, and hit/miss counts.
+Candidate rules can be promoted or removed without editing JSON by hand:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli rules approve profiles/default.json rule-...
+PYTHONPATH=src python -m decision_agent.cli rules reject profiles/default.json rule-...
+PYTHONPATH=src python -m decision_agent.cli rules retire profiles/default.json rule-...
+```
+
 Review with past records:
 
 ```bash
@@ -96,6 +112,8 @@ stored natural-language rules, known mistakes, and same-task history. The
 heuristic matcher uses token containment for English-like text and a dependency-free
 character n-gram fallback for Japanese or mixed text. Feedback is preserved as
 append-only JSONL records so later iterations can become more user-aligned.
+Profile writes use an atomic temp-file replace so interrupted writes do not leave
+partially written profile JSON.
 
 See [docs/operation-guide.md](docs/operation-guide.md) for the intended operating
 loop: review, capture user judgment, iterate, evaluate, then update the profile

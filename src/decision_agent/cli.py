@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
+from decision_agent.models import DecisionProfile, PatternEntry, PreferenceRule
 from decision_agent.storage import (
     append_decision_record,
     load_decision_records,
@@ -64,6 +66,20 @@ def main(argv: list[str] | None = None) -> int:
     evaluate_parser.add_argument("cases", type=Path)
     evaluate_parser.add_argument("--records", type=Path, help="Read past decision records from JSONL.")
     _add_engine_arguments(evaluate_parser)
+
+    rules_parser = subcommands.add_parser("rules", help="List or update profile rules.")
+    rules_subcommands = rules_parser.add_subparsers(dest="rules_command", required=True)
+
+    rules_list_parser = rules_subcommands.add_parser("list", help="List profile rules and patterns.")
+    rules_list_parser.add_argument("profile", type=Path)
+    rules_list_parser.add_argument("--status", choices=("active", "candidate", "retired"))
+    rules_list_parser.add_argument("--json", action="store_true", help="Print rules as JSON.")
+
+    for command in ("approve", "reject", "retire"):
+        command_parser = rules_subcommands.add_parser(command, help=f"{command} one profile rule.")
+        command_parser.add_argument("profile", type=Path)
+        command_parser.add_argument("rule_id")
+        command_parser.add_argument("--output", "-o", type=Path)
 
     args = parser.parse_args(argv)
 
@@ -135,6 +151,33 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
         return 0
 
+    if args.command == "rules":
+        profile = load_profile(args.profile)
+        if args.rules_command == "list":
+            rules = _rule_rows(profile, status=args.status)
+            if args.json:
+                print(json.dumps(rules, indent=2, ensure_ascii=False))
+            else:
+                for item in rules:
+                    print(
+                        "\t".join(
+                            (
+                                item["id"],
+                                item["kind"],
+                                item["status"],
+                                item["source"],
+                                str(item["hit_count"]),
+                                str(item["miss_count"]),
+                                item["text"],
+                            )
+                        )
+                    )
+            return 0
+
+        updated = _update_rule(profile, args.rule_id, args.rules_command, parser)
+        save_profile(updated, args.output or args.profile)
+        return 0
+
     parser.error(f"unknown command: {args.command}")
     return 2
 
@@ -164,6 +207,91 @@ def _engine_name(args: argparse.Namespace, parser: argparse.ArgumentParser) -> s
     if args.model and engine == "heuristic":
         parser.error("--model is only valid with --engine llm")
     return engine
+
+
+def _rule_rows(profile: DecisionProfile, *, status: str | None = None) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for kind, entries in _profile_rule_groups(profile):
+        for entry in entries:
+            if status and entry.status != status:
+                continue
+            rows.append(
+                {
+                    "id": entry.id,
+                    "kind": kind,
+                    "status": entry.status,
+                    "source": entry.source,
+                    "hit_count": entry.hit_count,
+                    "miss_count": entry.miss_count,
+                    "text": entry.text,
+                }
+            )
+    return rows
+
+
+def _update_rule(
+    profile: DecisionProfile,
+    rule_id: str,
+    action: str,
+    parser: argparse.ArgumentParser,
+) -> DecisionProfile:
+    updated = False
+
+    preference_rules: list[PreferenceRule] = []
+    for entry in profile.preference_rules:
+        replacement, changed = _update_entry(entry, rule_id, action, parser)
+        updated = updated or changed
+        if replacement is not None:
+            preference_rules.append(replacement)
+
+    negative_patterns: list[PatternEntry] = []
+    for entry in profile.negative_patterns:
+        replacement, changed = _update_entry(entry, rule_id, action, parser)
+        updated = updated or changed
+        if replacement is not None:
+            negative_patterns.append(replacement)
+
+    positive_examples: list[PatternEntry] = []
+    for entry in profile.positive_examples:
+        replacement, changed = _update_entry(entry, rule_id, action, parser)
+        updated = updated or changed
+        if replacement is not None:
+            positive_examples.append(replacement)
+
+    if not updated:
+        parser.error(f"rule not found: {rule_id}")
+
+    return replace(
+        profile,
+        preference_rules=tuple(preference_rules),
+        negative_patterns=tuple(negative_patterns),
+        positive_examples=tuple(positive_examples),
+    )
+
+
+def _update_entry(entry, rule_id: str, action: str, parser: argparse.ArgumentParser):
+    if entry.id != rule_id:
+        return entry, False
+
+    if action == "approve":
+        if entry.status != "candidate":
+            parser.error(f"only candidate rules can be approved: {rule_id}")
+        return replace(entry, status="active"), True
+    if action == "reject":
+        if entry.status != "candidate":
+            parser.error(f"only candidate rules can be rejected: {rule_id}")
+        return None, True
+    if action == "retire":
+        return replace(entry, status="retired"), True
+    parser.error(f"unknown rules command: {action}")
+
+
+def _profile_rule_groups(profile: DecisionProfile):
+    return (
+        ("preference_rule", profile.preference_rules),
+        ("negative_pattern", profile.negative_patterns),
+        ("positive_example", profile.positive_examples),
+    )
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ from decision_agent.models import (
     EvaluationCaseResult,
     EvaluationReport,
     KnownMistake,
+    PatternEntry,
+    PreferenceRule,
     SUPPORTED_VERDICTS,
     UserFeedback,
 )
@@ -125,9 +127,17 @@ class DecisionAgent:
 
         return replace(
             self.profile,
-            preference_rules=_append_unique(self.profile.preference_rules, user_feedback.preference_rules),
-            negative_patterns=_append_unique(self.profile.negative_patterns, user_feedback.negative_patterns),
-            positive_examples=_append_unique(self.profile.positive_examples, user_feedback.positive_examples),
+            preference_rules=_append_preference_rules(self.profile.preference_rules, user_feedback.preference_rules),
+            negative_patterns=_append_pattern_entries(
+                self.profile.negative_patterns,
+                user_feedback.negative_patterns,
+                kind="negative_pattern",
+            ),
+            positive_examples=_append_pattern_entries(
+                self.profile.positive_examples,
+                user_feedback.positive_examples,
+                kind="positive_example",
+            ),
             known_mistakes=_update_known_mistakes(self.profile.known_mistakes, agent_review, user_feedback),
             decision_records=(*self.profile.decision_records, record),
         )
@@ -360,4 +370,34 @@ def _append_unique(current: tuple[str, ...], additions: tuple[str, ...]) -> tupl
         if item and item not in seen:
             values.append(item)
             seen.add(item)
+    return tuple(values)
+
+
+def _append_preference_rules(
+    current: tuple[PreferenceRule, ...],
+    additions: tuple[str, ...],
+) -> tuple[PreferenceRule, ...]:
+    values = list(current)
+    seen = {item.id for item in current}
+    for item in additions:
+        entry = PreferenceRule.from_value({"text": item, "source": "feedback"})
+        if entry.text and entry.id not in seen:
+            values.append(entry)
+            seen.add(entry.id)
+    return tuple(values)
+
+
+def _append_pattern_entries(
+    current: tuple[PatternEntry, ...],
+    additions: tuple[str, ...],
+    *,
+    kind: str,
+) -> tuple[PatternEntry, ...]:
+    values = list(current)
+    seen = {item.id for item in current}
+    for item in additions:
+        entry = PatternEntry.from_value({"text": item, "source": "feedback"}, kind=kind)
+        if entry.text and entry.id not in seen:
+            values.append(entry)
+            seen.add(entry.id)
     return tuple(values)

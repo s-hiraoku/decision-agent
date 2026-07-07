@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from decision_agent.models import (
@@ -89,6 +91,18 @@ def _load_json(path: str | Path) -> dict[str, Any]:
 def _save_json(data: dict[str, Any], path: str | Path) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2, ensure_ascii=False)
-        file.write("\n")
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=output_path.parent,
+            delete=False,
+        ) as file:
+            json.dump(data, file, indent=2, ensure_ascii=False)
+            file.write("\n")
+            temp_name = file.name
+        os.replace(temp_name, output_path)
+    finally:
+        if temp_name and Path(temp_name).exists():
+            Path(temp_name).unlink()

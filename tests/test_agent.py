@@ -14,10 +14,12 @@ from decision_agent.models import (
     DecisionProfile,
     DecisionRecord,
     EvaluationCase,
+    PatternEntry,
+    PreferenceRule,
     ReviewIssue,
     UserFeedback,
 )
-from decision_agent.storage import append_decision_record, load_decision_records, load_evaluation_cases
+from decision_agent.storage import append_decision_record, load_decision_records, load_evaluation_cases, save_profile
 
 
 class DecisionAgentTest(unittest.TestCase):
@@ -151,6 +153,57 @@ class DecisionAgentTest(unittest.TestCase):
         review = DecisionAgent(profile).review(request)
 
         self.assertTrue(any("抽象概念を先に説明" in issue.reason for issue in review.issues))
+
+    def test_profile_loads_legacy_string_rules_as_structured_entries(self) -> None:
+        first = DecisionProfile.from_dict(
+            {
+                "user_id": "u1",
+                "criteria": {},
+                "preference_rules": ["start with user pain"],
+                "negative_patterns": ["generic conclusion"],
+                "positive_examples": ["failure-first opening"],
+            }
+        )
+        second = DecisionProfile.from_dict(first.to_dict())
+
+        self.assertEqual(first.schema_version, 2)
+        self.assertEqual(first.preference_rules[0], "start with user pain")
+        self.assertEqual(first.preference_rules[0].status, "active")
+        self.assertEqual(first.preference_rules[0].source, "user")
+        self.assertEqual(first.preference_rules[0].id, second.preference_rules[0].id)
+        self.assertEqual(first.negative_patterns[0], "generic conclusion")
+        self.assertEqual(first.positive_examples[0], "failure-first opening")
+
+    def test_review_uses_only_active_rules_and_records_rule_ids(self) -> None:
+        active = PreferenceRule.from_value("must begin with production outage story")
+        candidate = PreferenceRule.from_value(
+            {
+                "text": "include implementation details",
+                "status": "candidate",
+            }
+        )
+        negative = PatternEntry.from_value("abstract concept first", kind="negative_pattern")
+        profile = DecisionProfile(
+            user_id="u1",
+            criteria={},
+            preference_rules=(active, candidate),
+            negative_patterns=(negative,),
+        )
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "This article starts with an abstract concept first and then describes agent feedback. "
+                "It is long enough to inspect the structure and judge whether the opening gives readers "
+                "a concrete reason to care before introducing the system."
+            ),
+        )
+
+        review = DecisionAgent(profile).review(request)
+
+        self.assertTrue(any(issue.violated_rule_id == active.id for issue in review.issues))
+        self.assertFalse(any(issue.violated_rule_id == candidate.id for issue in review.issues))
+        self.assertTrue(any(issue.violated_rule_id == negative.id for issue in review.issues))
 
     def test_learn_records_feedback_and_updates_profile(self) -> None:
         profile = DecisionProfile(user_id="u1", criteria={})
@@ -465,6 +518,49 @@ class DecisionAgentTest(unittest.TestCase):
                 cli_main(["review", profile_path, request_path, "--engine", "llm"])
 
             self.assertIn("only the heuristic engine is implemented", stderr.getvalue())
+
+    def test_rules_cli_lists_and_updates_candidate_rules(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            candidate = PreferenceRule.from_value(
+                {
+                    "text": "start with a concrete failure case",
+                    "status": "candidate",
+                    "source": "extracted",
+                }
+            )
+            profile = DecisionProfile(user_id="u1", criteria={}, preference_rules=(candidate,))
+            save_profile(profile, profile_path)
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = cli_main(["rules", "list", profile_path, "--status", "candidate", "--json"])
+
+            self.assertEqual(exit_code, 0)
+            listed = json.loads(stdout.getvalue())
+            self.assertEqual(listed[0]["id"], candidate.id)
+
+            self.assertEqual(cli_main(["rules", "approve", profile_path, candidate.id]), 0)
+            with open(profile_path, encoding="utf-8") as file:
+                approved = DecisionProfile.from_dict(json.load(file))
+            self.assertEqual(approved.preference_rules[0].status, "active")
+
+            self.assertEqual(cli_main(["rules", "retire", profile_path, candidate.id]), 0)
+            with open(profile_path, encoding="utf-8") as file:
+                retired = DecisionProfile.from_dict(json.load(file))
+            self.assertEqual(retired.preference_rules[0].status, "retired")
+
+    def test_rules_cli_reject_removes_candidate_rule(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            candidate = PreferenceRule.from_value({"text": "avoid vague endings", "status": "candidate"})
+            save_profile(DecisionProfile(user_id="u1", criteria={}, preference_rules=(candidate,)), profile_path)
+
+            self.assertEqual(cli_main(["rules", "reject", profile_path, candidate.id]), 0)
+            with open(profile_path, encoding="utf-8") as file:
+                updated = DecisionProfile.from_dict(json.load(file))
+
+        self.assertEqual(updated.preference_rules, ())
 
 
 if __name__ == "__main__":

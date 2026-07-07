@@ -29,6 +29,10 @@ cases/
 - `records/*.jsonl` is append-only operational history.
 - `cases/*.jsonl` is a fixed evaluation set used to measure improvement.
 
+Profile rules are stored as structured objects with stable IDs. Legacy profiles
+that still use plain strings are accepted on read and are written back as
+structured entries the next time the profile is saved.
+
 Do not treat `records` and `cases` as the same thing. Records are the work log.
 Cases are the test set.
 Malformed evaluation case rows fail fast because a truncated test set would make
@@ -143,6 +147,23 @@ Weak profile updates are too broad:
 - `write like me`
 
 Prefer specific, observable rules that can affect the next review.
+
+Use the `rules` command to inspect and manage structured profile entries:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli rules list profiles/default.json --json
+PYTHONPATH=src python -m decision_agent.cli rules approve profiles/default.json rule-...
+PYTHONPATH=src python -m decision_agent.cli rules reject profiles/default.json rule-...
+PYTHONPATH=src python -m decision_agent.cli rules retire profiles/default.json rule-...
+```
+
+- `approve` changes a `candidate` rule to `active`.
+- `reject` removes a `candidate` rule.
+- `retire` keeps a rule in the profile but excludes it from future reviews.
+
+Only `active` entries are used by the heuristic review engine. Profile writes are
+atomic, so in-place rule updates do not leave partially written JSON if the
+process is interrupted.
 
 ## Operating Rhythm
 

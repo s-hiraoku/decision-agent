@@ -339,7 +339,7 @@ Implemented first steps:
 - review engine abstraction with the deterministic `heuristic` engine as the
   current default
 - natural-language preference rules, negative patterns, and positive examples on
-  the profile
+  the profile, stored as structured entries with stable IDs and lifecycle status
 - known mistakes promoted from verdict deltas
 - `review` CLI behavior that returns verdict, issues, revision instruction, and
   learned signals, including the producing `engine`
@@ -351,6 +351,9 @@ Implemented first steps:
   direction alignment
 - dependency-free Japanese/mixed-text heuristic matching using character n-gram
   containment in addition to English-like token containment
+- `rules list/approve/reject/retire` CLI behavior for non-interactive rule
+  lifecycle management
+- atomic profile writes through temp-file replacement
 
 Still incomplete:
 

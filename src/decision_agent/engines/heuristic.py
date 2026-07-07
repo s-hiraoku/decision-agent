@@ -9,6 +9,8 @@ from decision_agent.models import (
     ArtifactReviewRequest,
     DecisionProfile,
     DecisionRecord,
+    PatternEntry,
+    PreferenceRule,
     ReviewIssue,
     UserFeedback,
 )
@@ -63,28 +65,33 @@ class HeuristicReviewEngine:
                     )
                 )
 
-        negative_matches = _matched_items(profile.negative_patterns, text)
+        active_negative_patterns = tuple(item for item in profile.negative_patterns if item.applies_to(request.task_type))
+        negative_matches = _matched_items(active_negative_patterns, text)
         for pattern in negative_matches:
             issues.append(
                 ReviewIssue(
                     severity="high",
-                    reason=f"matches a negative pattern: {pattern}",
+                    reason=f"matches a negative pattern: {pattern.text}",
                     suggestion="revise the artifact so this pattern is removed or explicitly justified",
+                    violated_rule_id=pattern.id,
                 )
             )
 
-        matched_rules = _matched_items(profile.preference_rules, text)
-        missing_rules = [rule for rule in profile.preference_rules if rule not in matched_rules]
+        active_preference_rules = tuple(item for item in profile.preference_rules if item.applies_to(request.task_type))
+        matched_rules = _matched_items(active_preference_rules, text)
+        missing_rules = [rule for rule in active_preference_rules if rule not in matched_rules]
         for rule in missing_rules[:2]:
             issues.append(
                 ReviewIssue(
                     severity="medium",
-                    reason=f"does not clearly satisfy preference rule: {rule}",
+                    reason=f"does not clearly satisfy preference rule: {rule.text}",
                     suggestion="revise the artifact to make this preference visible in the structure or wording",
+                    violated_rule_id=rule.id,
                 )
             )
 
-        positive_matches = _matched_items(profile.positive_examples, text)
+        active_positive_examples = tuple(item for item in profile.positive_examples if item.applies_to(request.task_type))
+        positive_matches = _matched_items(active_positive_examples, text)
         if len([issue for issue in issues if issue.severity == "high"]) >= 2:
             verdict = "reject"
         elif issues:
@@ -99,7 +106,7 @@ class HeuristicReviewEngine:
             issues=tuple(issues),
             revision_instruction=_revision_instruction(verdict, issues),
             learned_signals=(
-                *(f"checked preference rule: {rule}" for rule in matched_rules[:3]),
+                *(f"checked preference rule: {rule.id} {rule.text}" for rule in matched_rules[:3]),
                 *(f"used past record: {record.id}" for record in relevant_records[:2] if record.id),
             ),
             engine=self.name,
@@ -165,8 +172,8 @@ def _review_text(request: ArtifactReviewRequest) -> str:
     return _normalize(f"{request.task_type} {request.intent} {context} {request.artifact}")
 
 
-def _matched_items(items: tuple[str, ...], text: str) -> list[str]:
-    return [item for item in items if text_matches_signal(item, text) or text_similarity(item, text) >= 0.34]
+def _matched_items(items: tuple[PreferenceRule | PatternEntry, ...], text: str) -> list[PreferenceRule | PatternEntry]:
+    return [item for item in items if text_matches_signal(item.text, text) or text_similarity(item.text, text) >= 0.34]
 
 
 def _token_containment(left: str, right: str) -> float:
