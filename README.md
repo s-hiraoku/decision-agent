@@ -57,6 +57,20 @@ PYTHONPATH=src python -m decision_agent.cli rules list examples/review-profile.j
 
 Profiles accept the legacy string form, but saving a profile now writes
 structured rule objects with stable IDs, status, provenance, and hit/miss counts.
+
+New rules and patterns learned from feedback start as `candidate` and do not
+yet apply to reviews. A candidate only promotes to `active` once the same
+pattern recurs across at least two distinct decision records without
+contradiction. `learn` prints a summary of which rules were touched and how
+many more distinct occurrences are needed before a candidate activates to
+stderr (stdout stays reserved for machine-readable output, and `learn`'s
+machine-readable artifact is the `--output` profile file); `iterate` embeds
+the same summary under a `"learning"` key in its stdout JSON, since its
+stdout is already a structured report. `rules list` also reports an
+advisory-only staleness flag for active rules that have not yet caused a
+review issue, or that are repeatedly contradicted by user feedback -- this
+is never used to auto-retire a rule.
+
 Candidate rules can be promoted or removed without editing JSON by hand:
 
 ```bash

@@ -5,11 +5,12 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import sys
 from typing import TypeVar
 
-from decision_agent.agent import DecisionAgent
+from decision_agent.agent import RECURRENCE_THRESHOLD, DecisionAgent
 from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
-from decision_agent.models import DecisionProfile, PatternEntry, PreferenceRule
+from decision_agent.models import DecisionProfile, KnownMistake, PatternEntry, PreferenceRule
 from decision_agent.storage import (
     append_decision_record,
     load_decision_records,
@@ -122,6 +123,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.records:
             append_decision_record(args.records, learned.decision_records[-1])
         save_profile(learned, args.output)
+        print(
+            json.dumps(
+                _learning_summary(learned, learned.decision_records[-1].id),
+                indent=2,
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
         return 0
 
     if args.command == "iterate":
@@ -141,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
                     "record": learned.decision_records[-1].to_dict(),
                     "profile": str(args.output),
                     "records": str(args.records),
+                    "learning": _learning_summary(learned, learned.decision_records[-1].id),
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -169,7 +179,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         "\t".join(
                             str(item[key])
-                            for key in ("id", "kind", "status", "source", "hit_count", "miss_count", "text")
+                            for key in (
+                                "id",
+                                "kind",
+                                "status",
+                                "source",
+                                "hit_count",
+                                "miss_count",
+                                "staleness",
+                                "text",
+                            )
                         )
                     )
             return 0
@@ -216,6 +235,40 @@ def _engine_name(args: argparse.Namespace, parser: argparse.ArgumentParser) -> s
     return engine
 
 
+def _learning_summary(profile: DecisionProfile, record_id: str) -> dict[str, object]:
+    """Report what this learn() call did to candidate/active rule status.
+
+    Per Philosophy, a rule taught in one learn() call may stay a candidate
+    that does not yet apply to reviews -- this surfaces that explicitly so
+    it reads as expected behavior, not a silent regression.
+    """
+    touched: list[dict[str, object]] = []
+    for kind, entries in (
+        *_profile_rule_groups(profile),
+        ("known_mistake", profile.known_mistakes),
+    ):
+        for entry in entries:
+            if record_id not in entry.source_record_ids:
+                continue
+            distinct_records = len(set(entry.source_record_ids))
+            remaining = max(0, RECURRENCE_THRESHOLD - distinct_records)
+            if isinstance(entry, KnownMistake):
+                identifier, text = entry.pattern, entry.pattern
+            else:
+                identifier, text = entry.id, entry.text
+            touched.append(
+                {
+                    "kind": kind,
+                    "id": identifier,
+                    "status": entry.status,
+                    "distinct_record_count": distinct_records,
+                    "records_needed_to_activate": remaining,
+                    "text": text,
+                }
+            )
+    return {"touched_rules": touched}
+
+
 def _rule_rows(profile: DecisionProfile, *, status: str | None = None) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for kind, entries in _profile_rule_groups(profile):
@@ -231,9 +284,29 @@ def _rule_rows(profile: DecisionProfile, *, status: str | None = None) -> list[d
                     "hit_count": entry.hit_count,
                     "miss_count": entry.miss_count,
                     "text": entry.text,
+                    "staleness": _staleness_flag(entry),
                 }
             )
     return rows
+
+
+def _staleness_flag(entry: PreferenceRule | PatternEntry) -> str:
+    """Advisory-only staleness signal, never used to auto-retire a rule.
+
+    Reuses RECURRENCE_THRESHOLD rather than introducing a new numeric
+    constant, per Philosophy: staleness should be flagged for
+    reconsideration, not silently acted on.
+    """
+    if entry.status != "active":
+        return ""
+    if entry.miss_count > entry.hit_count and entry.miss_count >= RECURRENCE_THRESHOLD:
+        return "consider reviewing: repeatedly contradicted by user feedback"
+    if not entry.last_used_at and entry.hit_count == 0 and entry.miss_count == 0:
+        # hit/miss only wire up when this rule caused a ReviewIssue (see
+        # _apply_rule_usage); "unexercised" means it has never surfaced an
+        # issue, not literally never consulted during a review.
+        return "unexercised: has not caused a review issue yet"
+    return ""
 
 
 def _update_rule(

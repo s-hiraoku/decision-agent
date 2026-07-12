@@ -818,6 +818,63 @@ class DecisionAgentTest(unittest.TestCase):
 
             self.assertIn("only the heuristic engine is implemented", stderr.getvalue())
 
+    def test_learn_cli_reports_candidate_status_and_activation_countdown(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            request_path = f"{directory}/request.json"
+            review_path = f"{directory}/review.json"
+            feedback_path = f"{directory}/feedback.json"
+            output_path = f"{directory}/learned.json"
+
+            save_profile(DecisionProfile(user_id="u1", criteria={}), profile_path)
+            with open(request_path, "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "task_type": "blog_outline",
+                        "intent": "write about Decision Agent",
+                        "artifact": "A short outline about Decision Agent.",
+                    },
+                    file,
+                )
+            with open(review_path, "w", encoding="utf-8") as file:
+                json.dump({"verdict": "revise", "confidence": 0.5, "summary": "needs work"}, file)
+            with open(feedback_path, "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "verdict": "revise",
+                        "notes": "Start with user pain.",
+                        "preference_rules": ["start with a concrete failure case"],
+                    },
+                    file,
+                )
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = cli_main(["learn", profile_path, request_path, review_path, feedback_path, "--output", output_path])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stdout.getvalue(), "")
+            summary = json.loads(stderr.getvalue())
+            touched = summary["touched_rules"]
+            self.assertEqual(len(touched), 1)
+            self.assertEqual(touched[0]["status"], "candidate")
+            self.assertEqual(touched[0]["records_needed_to_activate"], 1)
+
+    def test_rules_list_flags_unexercised_active_rule(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            rule = PreferenceRule.from_value({"text": "avoid vague endings", "status": "active"})
+            save_profile(DecisionProfile(user_id="u1", criteria={}, preference_rules=(rule,)), profile_path)
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = cli_main(["rules", "list", profile_path, "--json"])
+
+            self.assertEqual(exit_code, 0)
+            listed = json.loads(stdout.getvalue())
+            self.assertIn("unexercised", listed[0]["staleness"])
+
     def test_rules_cli_lists_and_updates_candidate_rules(self) -> None:
         with TemporaryDirectory() as directory:
             profile_path = f"{directory}/profile.json"

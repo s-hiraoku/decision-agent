@@ -141,10 +141,12 @@ class PreferenceRule:
     task_types: tuple[str, ...] = ()  # 空 = 全 task_type に適用
     status: str = "active"          # "active" | "candidate" | "retired"
     source: str = "user"            # "user" | "feedback" | "evaluation" | "extracted"
-    source_record_id: str = ""      # 由来する DecisionRecord / EvaluationCase の id
+    source_record_ids: tuple[str, ...] = ()  # 由来する DecisionRecord / EvaluationCase の id(複数)。
+                                     # 反復昇格(candidate -> active)の判定に distinct 件数を使う。
     hit_count: int = 0              # レビューで違反を検出できた回数(評価で加算)
     miss_count: int = 0             # このルールがあっても判断を外した回数
     created_at: str = ""
+    last_used_at: str = ""          # このルールが最後にレビューで参照された DecisionRecord の created_at
 ```
 
 **ID の決定性:** ID は uuid ではなく内容ハッシュ
