@@ -29,10 +29,26 @@ cases/
 - `records/*.jsonl` is append-only operational history.
 - `cases/*.jsonl` is a fixed evaluation set used to measure improvement.
 
+Profile rules are stored as structured objects with stable IDs. Legacy profiles
+that still use plain strings are accepted on read and are written back as
+structured entries the next time the profile is saved.
+
 Do not treat `records` and `cases` as the same thing. Records are the work log.
 Cases are the test set.
 Malformed evaluation case rows fail fast because a truncated test set would make
 accuracy numbers misleading.
+
+If an old profile contains embedded `decision_records`, migrate them once:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli migrate-history \
+  profiles/old-profile.json \
+  --records records/blog_outline.jsonl
+```
+
+The command reads the legacy embedded rows directly from the old JSON, appends
+them to JSONL, and saves the profile without embedded history. Re-running the
+command is safe because JSONL appends skip duplicate logical records.
 
 ## 1. Review An Artifact
 
@@ -42,8 +58,14 @@ Run a review before showing the user judgment to the agent.
 PYTHONPATH=src python -m decision_agent.cli review \
   profiles/default.json \
   requests/blog-outline-request.json \
-  --records records/blog_outline.jsonl
+  --records records/blog_outline.jsonl \
+  --engine heuristic
 ```
+
+`heuristic` is the only implemented engine today. It is deterministic, requires
+no API key, and records `"engine": "heuristic"` in review output. The LLM engine
+is specified in [detailed-design.md](detailed-design.md), but `--engine llm`
+currently fails fast so review records do not silently mix engine behavior.
 
 The output contains:
 
@@ -51,6 +73,7 @@ The output contains:
 - `issues`: reasons and suggestions
 - `revision_instruction`: the next direction to send back into the loop
 - `learned_signals`: which stored rules or records influenced the review
+- `engine`: which review engine produced the judgment
 
 ## 2. Capture User Judgment
 
@@ -104,7 +127,8 @@ After collecting several examples, evaluate the agent against fixed cases.
 PYTHONPATH=src python -m decision_agent.cli evaluate \
   profiles/default.json \
   cases/blog_outline_cases.jsonl \
-  --records records/blog_outline.jsonl
+  --records records/blog_outline.jsonl \
+  --engine heuristic
 ```
 
 The report includes:
@@ -135,6 +159,23 @@ Weak profile updates are too broad:
 - `write like me`
 
 Prefer specific, observable rules that can affect the next review.
+
+Use the `rules` command to inspect and manage structured profile entries:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli rules list profiles/default.json --json
+PYTHONPATH=src python -m decision_agent.cli rules approve profiles/default.json rule-...
+PYTHONPATH=src python -m decision_agent.cli rules reject profiles/default.json rule-...
+PYTHONPATH=src python -m decision_agent.cli rules retire profiles/default.json rule-...
+```
+
+- `approve` changes a `candidate` rule to `active`.
+- `reject` removes a `candidate` rule.
+- `retire` keeps a rule in the profile but excludes it from future reviews.
+
+Only `active` entries are used by the heuristic review engine. Profile writes are
+atomic, so in-place rule updates do not leave partially written JSON if the
+process is interrupted.
 
 ## Operating Rhythm
 

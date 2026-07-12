@@ -1,21 +1,29 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
+import os
 from pathlib import Path
 
 from decision_agent.agent import DecisionAgent
+from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
+from decision_agent.models import DecisionProfile, PatternEntry, PreferenceRule
 from decision_agent.storage import (
     append_decision_record,
     load_decision_records,
     load_evaluation_cases,
     load_feedback,
+    load_legacy_profile_decision_records,
     load_profile,
     load_request,
     load_review,
     load_review_request,
     save_profile,
 )
+
+
+SUPPORTED_ENGINES = {"heuristic"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     review_parser.add_argument("profile", type=Path)
     review_parser.add_argument("request", type=Path)
     review_parser.add_argument("--records", type=Path, help="Read past decision records from JSONL.")
+    _add_engine_arguments(review_parser)
 
     learn_parser = subcommands.add_parser("learn", help="Record user feedback from a review.")
     learn_parser.add_argument("profile", type=Path)
@@ -43,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     learn_parser.add_argument("feedback", type=Path)
     learn_parser.add_argument("--output", "-o", type=Path, required=True)
     learn_parser.add_argument("--records", type=Path, help="Append the learned decision record to JSONL.")
+    _add_engine_arguments(learn_parser)
 
     iterate_parser = subcommands.add_parser("iterate", help="Review, learn from feedback, and append history.")
     iterate_parser.add_argument("profile", type=Path)
@@ -50,11 +60,32 @@ def main(argv: list[str] | None = None) -> int:
     iterate_parser.add_argument("--feedback", type=Path, required=True)
     iterate_parser.add_argument("--records", type=Path, required=True)
     iterate_parser.add_argument("--output", "-o", type=Path, required=True)
+    _add_engine_arguments(iterate_parser)
 
     evaluate_parser = subcommands.add_parser("evaluate", help="Compare agent reviews against user judgments.")
     evaluate_parser.add_argument("profile", type=Path)
     evaluate_parser.add_argument("cases", type=Path)
     evaluate_parser.add_argument("--records", type=Path, help="Read past decision records from JSONL.")
+    _add_engine_arguments(evaluate_parser)
+
+    rules_parser = subcommands.add_parser("rules", help="List or update profile rules.")
+    rules_subcommands = rules_parser.add_subparsers(dest="rules_command", required=True)
+
+    rules_list_parser = rules_subcommands.add_parser("list", help="List profile rules and patterns.")
+    rules_list_parser.add_argument("profile", type=Path)
+    rules_list_parser.add_argument("--status", choices=("active", "candidate", "retired"))
+    rules_list_parser.add_argument("--json", action="store_true", help="Print rules as JSON.")
+
+    for command in ("approve", "reject", "retire"):
+        command_parser = rules_subcommands.add_parser(command, help=f"{command} one profile rule.")
+        command_parser.add_argument("profile", type=Path)
+        command_parser.add_argument("rule_id")
+        command_parser.add_argument("--output", "-o", type=Path)
+
+    migrate_parser = subcommands.add_parser("migrate-history", help="Move legacy embedded profile records to JSONL.")
+    migrate_parser.add_argument("profile", type=Path)
+    migrate_parser.add_argument("--records", type=Path, required=True)
+    migrate_parser.add_argument("--output", "-o", type=Path)
 
     args = parser.parse_args(argv)
 
@@ -75,11 +106,13 @@ def main(argv: list[str] | None = None) -> int:
         profile = load_profile(args.profile)
         request = load_review_request(args.request)
         records = load_decision_records(args.records) if args.records else None
-        review = DecisionAgent(profile).review(request, history_records=records)
+        agent = _agent(profile, args, parser)
+        review = agent.review(request, history_records=records)
         print(json.dumps(review.to_dict(), indent=2, ensure_ascii=False))
         return 0
 
     if args.command == "learn":
+        _engine_name(args, parser)
         profile = load_profile(args.profile)
         request = load_review_request(args.request)
         review = load_review(args.review)
@@ -95,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         request = load_review_request(args.request)
         feedback = load_feedback(args.feedback)
         records = load_decision_records(args.records)
-        agent = DecisionAgent(profile)
+        agent = _agent(profile, args, parser)
         review = agent.review(request, history_records=records)
         learned = agent.learn(request, review, feedback)
         append_decision_record(args.records, learned.decision_records[-1])
@@ -120,12 +153,158 @@ def main(argv: list[str] | None = None) -> int:
         if not cases:
             parser.error(f"no valid evaluation cases found in: {args.cases}")
         records = load_decision_records(args.records) if args.records else None
-        report = DecisionAgent(profile).evaluate(cases, history_records=records)
+        report = _agent(profile, args, parser).evaluate(cases, history_records=records)
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "rules":
+        profile = load_profile(args.profile)
+        if args.rules_command == "list":
+            rules = _rule_rows(profile, status=args.status)
+            if args.json:
+                print(json.dumps(rules, indent=2, ensure_ascii=False))
+            else:
+                for item in rules:
+                    print(
+                        "\t".join(
+                            (
+                                item["id"],
+                                item["kind"],
+                                item["status"],
+                                item["source"],
+                                str(item["hit_count"]),
+                                str(item["miss_count"]),
+                                item["text"],
+                            )
+                        )
+                    )
+            return 0
+
+        updated = _update_rule(profile, args.rule_id, args.rules_command, parser)
+        save_profile(updated, args.output or args.profile)
+        return 0
+
+    if args.command == "migrate-history":
+        profile = load_profile(args.profile)
+        for record in load_legacy_profile_decision_records(args.profile):
+            append_decision_record(args.records, record)
+        save_profile(replace(profile, decision_records=()), args.output or args.profile)
         return 0
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _add_engine_arguments(command_parser: argparse.ArgumentParser) -> None:
+    command_parser.add_argument(
+        "--engine",
+        choices=("heuristic", "llm"),
+        help="Review engine to use. Defaults to DECISION_AGENT_ENGINE or heuristic.",
+    )
+    command_parser.add_argument("--model", help="LLM model name. Reserved for the llm engine.")
+
+
+def _agent(profile, args: argparse.Namespace, parser: argparse.ArgumentParser) -> DecisionAgent:
+    _engine_name(args, parser)
+    return DecisionAgent(
+        profile,
+        review_engine=HeuristicReviewEngine(),
+        agreement_judge=HeuristicAgreementJudge(),
+    )
+
+
+def _engine_name(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
+    engine = args.engine or os.environ.get("DECISION_AGENT_ENGINE", "heuristic")
+    if engine not in SUPPORTED_ENGINES:
+        parser.error("only the heuristic engine is implemented; llm support is planned in docs/detailed-design.md")
+    if args.model and engine == "heuristic":
+        parser.error("--model is only valid with --engine llm")
+    return engine
+
+
+def _rule_rows(profile: DecisionProfile, *, status: str | None = None) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for kind, entries in _profile_rule_groups(profile):
+        for entry in entries:
+            if status and entry.status != status:
+                continue
+            rows.append(
+                {
+                    "id": entry.id,
+                    "kind": kind,
+                    "status": entry.status,
+                    "source": entry.source,
+                    "hit_count": entry.hit_count,
+                    "miss_count": entry.miss_count,
+                    "text": entry.text,
+                }
+            )
+    return rows
+
+
+def _update_rule(
+    profile: DecisionProfile,
+    rule_id: str,
+    action: str,
+    parser: argparse.ArgumentParser,
+) -> DecisionProfile:
+    updated = False
+
+    preference_rules: list[PreferenceRule] = []
+    for entry in profile.preference_rules:
+        replacement, changed = _update_entry(entry, rule_id, action, parser)
+        updated = updated or changed
+        if replacement is not None:
+            preference_rules.append(replacement)
+
+    negative_patterns: list[PatternEntry] = []
+    for entry in profile.negative_patterns:
+        replacement, changed = _update_entry(entry, rule_id, action, parser)
+        updated = updated or changed
+        if replacement is not None:
+            negative_patterns.append(replacement)
+
+    positive_examples: list[PatternEntry] = []
+    for entry in profile.positive_examples:
+        replacement, changed = _update_entry(entry, rule_id, action, parser)
+        updated = updated or changed
+        if replacement is not None:
+            positive_examples.append(replacement)
+
+    if not updated:
+        parser.error(f"rule not found: {rule_id}")
+
+    return replace(
+        profile,
+        preference_rules=tuple(preference_rules),
+        negative_patterns=tuple(negative_patterns),
+        positive_examples=tuple(positive_examples),
+    )
+
+
+def _update_entry(entry, rule_id: str, action: str, parser: argparse.ArgumentParser):
+    if entry.id != rule_id:
+        return entry, False
+
+    if action == "approve":
+        if entry.status != "candidate":
+            parser.error(f"only candidate rules can be approved: {rule_id}")
+        return replace(entry, status="active"), True
+    if action == "reject":
+        if entry.status != "candidate":
+            parser.error(f"only candidate rules can be rejected: {rule_id}")
+        return None, True
+    if action == "retire":
+        return replace(entry, status="retired"), True
+    parser.error(f"unknown rules command: {action}")
+
+
+def _profile_rule_groups(profile: DecisionProfile):
+    return (
+        ("preference_rule", profile.preference_rules),
+        ("negative_pattern", profile.negative_patterns),
+        ("positive_example", profile.positive_examples),
+    )
 
 
 if __name__ == "__main__":

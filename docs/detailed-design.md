@@ -16,7 +16,7 @@
 |---|---------|------------|
 | G1 | LLM ベースのレビュー | `ReviewEngine` 抽象化 + `LLMReviewEngine`(§4, §5) |
 | G2 | 自由記述フィードバックからの耐久的ルール抽出 | LLM による候補ルール抽出 + ユーザー承認フロー(§6) |
-| G3 | 評価のセマンティックマッチング | LLM ジャッジによる一致判定 + 決定的フォールバック(§7) |
+| G3 | 評価のセマンティックマッチング | LLM ジャッジによる一致判定 + heuristic 側の文字 n-gram 化(§7) |
 | G4 | 生成エージェントとのオーケストレーション | Revise ループの JSON 契約定義(§8。実装は契約のみ、生成側は非スコープ) |
 | G5 | 数値スコアでない、ユーザー整合の判断最適化 | ルールの構造化(provenance / status / 実績カウント)と評価駆動の昇格・降格(§3, §6) |
 
@@ -215,6 +215,117 @@ violated_rule_id: str = ""  # 違反した PreferenceRule / PatternEntry の id(
 いずれも `from_dict` は欠損を空文字で許容する(既存レコードとの互換)。
 DecisionRecord に engine が保存されるため、後から「LLM レビューと heuristic レビューで
 delta の傾向がどう違うか」を JSONL から分析できる。
+
+### 3.5 決定履歴の Source of Truth 一本化
+
+**現状の問題:** 仕様書(設計原則 4)は「プロファイルは編集可能な要約、JSONL は
+append-only の生の証拠」と定めているが、現行実装はこれに反する。
+`DecisionProfile.decision_records` というフィールドが存在し、`DecisionAgent.learn`
+は毎回そこへレコードを追記した新しいプロファイルを返す。CLI の `learn` /
+`iterate` はその戻り値をそのまま `save_profile` するため、`--records` で
+JSONL に追記しているにもかかわらず、**同じ履歴がプロファイル JSON 側にも
+無制限に蓄積される**。反復するたびにプロファイルファイルが肥大化し、
+`review` / `evaluate` に `--records` を渡さなかった場合は
+`self.profile.decision_records`(プロファイル内の全履歴)を使うため、
+「どちらが正か」が呼び出し方によって変わる二重管理になっている。
+
+**設計方針:** `DecisionProfile` から `decision_records` フィールドを削除し、
+JSONL を履歴の唯一の Source of Truth とする。
+
+```python
+@dataclass(frozen=True)
+class DecisionProfile:
+    user_id: str
+    criteria: dict[str, float]
+    schema_version: int = 2
+    examples: tuple[DecisionExample, ...] = ()
+    preference_rules: tuple[PreferenceRule, ...] = ()
+    negative_patterns: tuple[PatternEntry, ...] = ()
+    positive_examples: tuple[PatternEntry, ...] = ()
+    known_mistakes: tuple[KnownMistake, ...] = ()
+    # decision_records は削除。履歴は常に JSONL からロードする。
+```
+
+- `DecisionAgent.learn` のシグネチャを変更し、更新済みプロファイルと新規
+  `DecisionRecord` を**別々の値として返す**。
+  ```python
+  def learn(
+      self,
+      request: ArtifactReviewRequest,
+      agent_review: ArtifactReview,
+      user_feedback: UserFeedback,
+  ) -> tuple[DecisionProfile, DecisionRecord]: ...
+  ```
+  これにより CLI 側の `learned.decision_records[-1]`(「プロファイルの末尾要素を
+  取り出して JSONL に書く」という暗黙の結合。`--records` を渡さず `learn` を
+  呼んだ場合、このレコードはどこにも永続化されず消える)を解消する。
+- `DecisionAgent.review` / `evaluate` は `history_records` を必須の明示引数にする
+  (プロファイル内フォールバックを廃止)。「履歴を渡さない = 空」と単純化し、
+  §4 の履歴選別ステップは常に呼び出し側が渡した records に対して動く。
+- **書き込み順序:** `learn` を呼ぶ CLI コマンド(`learn` / `iterate`)は、
+  1. JSONL に新規 `DecisionRecord` を追記
+  2. 成功したら更新済みプロファイルを保存
+  の順で実行する。1 が失敗すればプロファイルは保存しない。2 が失敗しても
+  JSONL 追記は既に成立しているため履歴は失われない(この順序と atomic write
+  の必要性は §9 で扱う)。
+- **読み込み時の上限:** レコード数が増えた場合に備え、
+  `load_decision_records(path, limit=None)` を storage 層に用意する。
+  `limit` 指定時は「同一 task_type を優先し、`created_at` 降順で直近 N 件」を返す
+  (§4 の履歴選別はこの上限後の集合に対して動く)。
+
+**移行:** 旧形式プロファイル(`decision_records` を含む JSON)を読み込んだ場合、
+`DecisionProfile.from_dict` はそのフィールドを無視し、プロファイル本体
+(criteria / rules 等)だけを読む。埋もれていた履歴を失わずに JSONL へ
+移すため、1 回限りの移行コマンドを提供する。
+
+移行コマンドは通常の `DecisionProfile.from_dict` とは別に、旧 JSON から
+`decision_records` を直接読む legacy loader を使う。これにより、通常のプロファイル
+モデルが履歴を無視する状態になっても、移行前の埋め込み履歴を失わない。
+
+```bash
+decision-agent migrate-history <old-profile.json> --records <records.jsonl>
+```
+
+- 旧プロファイル内の `decision_records` を読み、`records.jsonl` に
+  追記する。
+- JSONL への追記は `id` ではなく、`request` / `agent_review` / `user_feedback` /
+  `delta` から作る論理 fingerprint で重複判定する。`_record_id` は呼び出しごとに
+  変わるため、`id` だけで dedupe すると、プロファイル保存失敗後の再実行で同じ
+  feedback が二重 append される。
+- 完了後のプロファイルは `decision_records` の中身を空にして保存し直す。
+- Phase 2(§11)にこの移行コマンドの追加を含める。
+
+### 3.6 task_type の拡張方法
+
+**現状の問題:** `SUPPORTED_TASK_TYPES = {"blog_outline", "talk_outline",
+"video_script"}` が `models.py` にハードコードされ、`ArtifactReviewRequest.from_dict`
+がこの集合でバリデーションする。仕様書は「コアループを変えずに他の主観的成果物
+(例: プレスリリース文、SNS 投稿文案)へ拡張できること」を求めているが、
+現行実装では新しい成果物種別を足すたびにコード変更とリリースが要る。
+
+**設計方針:** task_type の許可リストをコードからプロファイルへ移す。
+
+```python
+@dataclass(frozen=True)
+class DecisionProfile:
+    ...
+    task_types: tuple[str, ...] = DEFAULT_TASK_TYPES  # 既定は現行 3 種を維持
+```
+
+- `ArtifactReviewRequest.from_dict` は単体では task_type を検証しない
+  (リクエスト JSON だけでは何が有効かを判断できないため)。検証は
+  `DecisionAgent` 生成時、または `review` / `learn` / `evaluate` の入口で
+  `request.task_type in profile.task_types` として行う。
+- 未知の task_type はエラーにする(自由文字列を許して黙って受理すると、
+  タイプミスで履歴が `"blog_outline"` と `"blog_oultine"` のように分裂し、
+  §4 の履歴選別が壊れる)。エラーメッセージは
+  「`profile.task_types` に追加してください」と具体的な次のアクションを示す。
+- 後方互換: `task_types` を持たない旧プロファイルは `DEFAULT_TASK_TYPES`
+  (現行の 3 種)で読み込む。
+- `decision-agent profile add-task-type <profile> <task_type> [--output F]`
+  のような専用コマンドは設けない。task_type の追加はプロファイル JSON の
+  直接編集で十分に低コストであり、コマンド化するとルール承認 CLI(§6.3)との
+  一貫性(承認フローが必要なほど重要な変更ではない)が取れなくなる。
 
 ## 4. レビューパイプライン(エンジン共通の流れ)
 
@@ -419,6 +530,125 @@ LLM ジャッジ導入により evaluate は非決定的になる。レポート
   明示指定した場合のみ hit/miss カウントを書き戻す(ルールの追加・削除・status 変更は
   この経路でも行わない)。
 
+### 7.5 heuristic エンジンの日本語対応(LLM 不要経路)
+
+§7.1〜7.4 は `--engine llm` を前提にした解決だが、§1.2 の設計原則 3 が
+「LLM なしでも全コマンドが動作する」と定めている以上、既定の `heuristic` エンジンでも
+日本語プロファイル・日本語 artifact が最低限機能する必要がある。現状はここが未解決。
+
+**現状の問題:** `review` の判定に使う `_text_similarity` / `_matched_items` /
+`_relevant_records` はすべて `\w+` によるトークン化(`engines/heuristic.py` へ
+移設後も同じロジック)を土台にしており、空白で分かち書きされない日本語では
+文またはフレーズ全体が 1 トークンになる。結果として:
+
+- `known_mistakes` の照合(閾値 0.2)、`preference_rules` / `negative_patterns` の
+  照合(閾値 0.34)が、日本語入力では完全一致以外ほぼ発火しない
+- `_relevant_records` の履歴類似度ランキングが日本語では機能せず、
+  `learned_signals` に載る「使った過去レコード」が実質ランダムになる
+- 仕様書(`decision-agent-spec.md`)のレビュー入出力例は日本語だが、
+  そのサンプルをそのまま heuristic エンジンに通しても、ルール照合・履歴参照が
+  意図どおりに働かない
+
+`--engine llm` を使えばこの問題は AgreementJudge 側では回避できるが、それは
+**evaluate の一致判定**に限った話であり、`review` 本体の日本語プロファイル照合
+(known_mistakes、preference_rules、negative_patterns、履歴類似度)は
+heuristic 経路である限り LLM の有無に関わらず影響を受ける
+(`review` の既定エンジンは §2.2 のとおり heuristic のままなので、
+API キーを持たないユーザーの主要な利用経路がこれに当たる)。
+
+**設計方針:** `engines/heuristic.py` の文字列比較を、依存ゼロで動く
+文字 n-gram Jaccard 係数に置き換える。
+
+```python
+def _char_ngrams(text: str, n: int = 2) -> set[str]:
+    normalized = re.sub(r"\s+", "", text.lower())
+    if len(normalized) < n:
+        return {normalized} if normalized else set()
+    return {normalized[i : i + n] for i in range(len(normalized) - n + 1)}
+
+def _ngram_similarity(left: str, right: str) -> float:
+    left_grams, right_grams = _char_ngrams(left), _char_ngrams(right)
+    if not left_grams or not right_grams:
+        return 0.0
+    return len(left_grams & right_grams) / len(left_grams | right_grams)
+```
+
+- 文字 2-gram は言語非依存で、日本語・英語のどちらでも最低限の部分一致を検出できる
+  (既存の英語向けトークン一致は特殊ケースとして包含される)。
+- `_text_similarity`(`containment` 用途: パターンが本文にどれだけ現れるか)と
+  `_ngram_similarity`(対称的な類似度)は用途が異なるため、
+  `engines/heuristic.py` 内で別関数として残す。既存の呼び出し箇所
+  (known_mistakes 照合 0.2、preference_rules/negative_patterns 照合 0.34、
+  履歴類似度、`_text_matches_signal` 0.25)を n-gram 版に差し替えるが、
+  各閾値は英語コーパスで調整された値なので、置き換え後に
+  `examples/blog-outline-cases.jsonl` 相当の日本語ケースで再チューニングする
+  (Phase 2 のテストで検証する)。
+- 形態素解析(`sudachipy` 等)への発展は本書のスコープ外とする。
+  文字 n-gram は依存ゼロで §1.2 原則 3 を満たす最小限の改善であり、
+  単語単位の精度が必要になった場合は `[ja]` extra として別途検討する。
+
+**適用範囲:** この変更は `engines/heuristic.py` 内のプライベート関数の置き換えのみで、
+`ReviewEngine` / `AgreementJudge` の外部契約(§2.2)には影響しない。
+Phase 1(§11)の「既存ロジックを `engines/heuristic.py` へ移設」の直後、
+Phase 2 着手前に行うのが最小コストになる
+(移設後に置き換えれば、移設自体は純粋なコード移動のまま検証できる)。
+
+### 7.6 評価の時系列トラッキング
+
+**現状の問題:** 仕様書の成功基準は「反復によりエージェントの判断がユーザーの
+判断に近づくこと」だが、`evaluate` は実行のたびにレポートを stdout へ出すだけで、
+過去の実行結果を保存・比較する手段がない。運用ガイドは「5〜10 ケース追加ごとに
+evaluate を実行する」運用リズムを推奨しているが、precision が改善しているか
+悪化しているかを確認する方法が「過去の出力をユーザーが手元に残しているか」に
+依存してしまっている。
+
+**設計方針:** `evaluate` に `--history <path>` を追加し、実行結果を
+append-only JSONL として記録する。
+
+```bash
+decision-agent evaluate profiles/default.json cases/blog_outline_cases.jsonl \
+  --records records/blog_outline.jsonl \
+  --history evals/blog_outline_evals.jsonl
+```
+
+追記される 1 行(`EvaluationRun`)の形:
+
+```python
+@dataclass(frozen=True)
+class EvaluationRun:
+    run_at: str                       # ISO 8601
+    profile_fingerprint: str          # "sha256:" + プロファイル正規化 JSON のハッシュ
+    cases_fingerprint: str            # "sha256:" + cases ファイル内容のハッシュ
+    cases: int
+    engine: str                       # "heuristic" | "llm:claude-opus-4-8"
+    verdict_accuracy: float
+    core_issue_accuracy: float | None
+    revision_direction_accuracy: float | None
+```
+
+- **fingerprint を持つ理由:** ケースセット自体が変わった run 同士を比較しても
+  精度の上下に意味がない(ケースが難化 / 易化しただけかもしれない)。
+  `cases_fingerprint` が一致する run だけを時系列として扱う。
+  同様に `profile_fingerprint` は「同じプロファイルに対して heuristic /
+  llm 両エンジンで評価した」ケースを区別するために使う(§7.3 の注意と整合)。
+  フィンガープリントの算出は §5.4 の `rendering.py` の決定的シリアライズを再利用し、
+  プロファイルの読み込み順序やキー順に依存しないようにする。
+- **レポートへの反映:** `evaluate` の標準出力に `delta_vs_previous` を追加する。
+  `--history` で指定したファイルから同一 `cases_fingerprint` かつ同一 `engine` の
+  直近 run を探し、`verdict_accuracy` 等の差分を表示する。該当する過去 run が
+  なければ `null`(初回実行)。
+- **ケース ID の安定性が前提になる:** `EvaluationCaseResult.id` は現行実装だと
+  `case.id` が空の場合 `f"case-{index}"` にフォールバックし、行順に依存する。
+  ケースファイルに行を追加・並べ替えると同じ artifact が別 ID として扱われ、
+  時系列比較や `common_misses` の集計が壊れる。`load_evaluation_cases` は
+  `id` が空の行を**警告付きで許容**し(現行の壊れやすい挙動を維持しない)、
+  `evaluate --strict` 指定時は `id` 欠落をエラーにする。運用ガイドには
+  「cases に追加する行には必ず `id` を振る」ことを明記する。
+- **保存先は `--records` と同じ性質(append-only JSONL)** とし、
+  `storage.append_evaluation_run(path, run)` を追加する。プロファイルや
+  cases ファイルのような「編集可能な現在状態」ではないため、
+  atomic write(§9)の対象にはしない(追記のみで上書きしないため)。
+
 ## 8. 生成エージェント連携(Revise ループ契約)
 
 Decision Agent 側は「レビュー結果を生成エージェントに返す」ための JSON 契約だけ定義する。
@@ -454,45 +684,63 @@ learn    <profile> <request> <review> <feedback> --output F [--records F]
 iterate  <profile> <request> --feedback F --records F --output F
          [--engine ...] [--propose-rules]
 evaluate <profile> <cases> [--records F] [--engine ...] [--model M]
-         [--apply-stats --output F]
+         [--apply-stats --output F] [--history F] [--strict]
 rules    {list,approve,reject,retire} <profile> [<rule-id>] [--output F] [--json]
+migrate-history <old-profile> --records F [--output F]
 decide / train   # 既存のまま(凍結)
 ```
 
 - `--engine` 既定は `heuristic`。環境変数 `DECISION_AGENT_ENGINE` でも指定可
   (CLI フラグが優先)。
 - `--model` 既定は `claude-opus-4-8`。
+- `evaluate --history F` は §7.6 の `EvaluationRun` を追記し、直前の同一
+  `cases_fingerprint`・同一 `engine` の run との差分をレポートに含める。
+  `--strict` は評価ケースの `id` 欠落をエラーにする(§7.6)。
 - `rules approve/reject/retire` で `--output` 省略時は入力プロファイルを上書きする
   (この 3 コマンドは編集が目的なので in-place を既定とする)。
+- `migrate-history` は §3.5 の一回限りの移行コマンド。旧プロファイル内の
+  `decision_records` を `--records` の JSONL へ追記し、`decision_records` を
+  持たないプロファイルを `--output`(省略時は入力を上書き)に書き出す。
 - **プロファイルの書き込みは常に原子的に行う。** `storage._save_json` を
   「同一ディレクトリの一時ファイルに書いてから `os.replace` で差し替える」実装に
   変更する(in-place 上書き時に書き込みが中断されてもプロファイルが
   切り詰められない。`os.replace` は同一ファイルシステム内でアトミック)。
   これは rules コマンドに限らず `save_profile` 全経路に適用する。
+  `learn` / `iterate` は §3.5 の書き込み順序(JSONL 追記 → プロファイル保存)を守る。
 
 ## 10. テスト戦略
 
-1. **既存テストは無変更で通す。** heuristic 経路の挙動は移設のみで変えない
-   (`engines/heuristic.py` への移動はリファクタリングであり、
-   `DecisionAgent.review` の入出力は同一)。
-2. **LLM エンジンは Fake で単体テスト。** `engines/llm.py` はクライアントを
+1. **既存テストは無変更で通す。** `engines/heuristic.py` への移動自体はリファクタリングで
+   挙動を変えない。ただし Phase 1 内の §3.5(履歴一本化)・§3.6(task_types)・
+   §7.5(n-gram 化)は意図的な破壊的変更なので、これらに対応する既存テストは
+   同じ Phase 1 内で更新する(「既存テストが無変更で通る」のはこれらの変更を
+   除いた範囲)。
+2. **決定履歴一本化のテスト(§3.5)。** `learn` が `(profile, record)` を返すこと、
+   `profile` に `decision_records` が含まれないこと、`--records` 未指定で
+   `learn` を呼んでも例外にならず単に永続化されないこと、`migrate-history` が
+   旧プロファイルの履歴を過不足なく JSONL へ移し替えることを検証する。
+3. **評価履歴のテスト(§7.6)。** 同一 `cases_fingerprint` の 2 回目の
+   `evaluate --history` 実行で `delta_vs_previous` が計算されること、
+   `cases_fingerprint` が異なる run とは比較されないこと(`null` になること)、
+   ケース `id` 欠落が `--strict` でエラーになることを検証する。
+4. **LLM エンジンは Fake で単体テスト。** `engines/llm.py` はクライアントを
    コンストラクタ注入(`client: anthropic.Anthropic | None = None`)にし、
    テストでは `messages.parse` を模した Fake を渡す。ネットワークを叩くテストは書かない。
    - parse 失敗 → 1 リトライ → 失敗、の分岐
    - LLMReviewOutput → ArtifactReview 変換(violated_rule_id → learned_signals)
    - max_tokens 切り詰めの拒否
-3. **rendering.py の決定性テスト。** 同一プロファイルを 2 回レンダリングして
+5. **rendering.py の決定性テスト。** 同一プロファイルを 2 回レンダリングして
    バイト一致、dict 順序をシャッフルした等価プロファイルでもバイト一致、を検証する
    (キャッシュ有効性の回帰テスト)。
-4. **後方互換テスト。** 文字列形式ルールの旧プロファイル / `engine` フィールドの無い
+6. **後方互換テスト。** 文字列形式ルールの旧プロファイル / `engine` フィールドの無い
    旧 DecisionRecord を読み、書き出すと新形式になることを検証する。
    旧プロファイルを 2 回 load して同一のルール ID が採番されること
    (内容ハッシュ由来の決定性)も検証する。
-5. **原子的書き込みテスト。** `save_profile` が一時ファイル経由で書くこと、
+7. **原子的書き込みテスト。** `save_profile` が一時ファイル経由で書くこと、
    書き込み先に部分的な JSON が残らないことを検証する。
-6. **rules CLI のテスト。** candidate → approve → active、reject → 削除、を
+8. **rules CLI のテスト。** candidate → approve → active、reject → 削除、を
    一時ファイルで検証する。
-7. **手動スモーク(CI 外)。** `ANTHROPIC_API_KEY` がある環境でのみ
+9. **手動スモーク(CI 外)。** `ANTHROPIC_API_KEY` がある環境でのみ
    `examples/` に対する `review --engine llm` を実行する手順を README に記載する。
 
 ## 11. 実装フェーズ分割
@@ -503,15 +751,23 @@ decide / train   # 既存のまま(凍結)
 
 1. `engines/` パッケージ作成、Protocol 定義
 2. 既存レビューロジックを `engines/heuristic.py` へ移設、`DecisionAgent` を委譲構造に変更
-3. CLI に `--engine` を追加(heuristic のみ受理)
-4. 既存テスト全通過を確認
+3. 文字 n-gram によるテキスト一致判定への置き換え(§7.5)、日本語ケースでの閾値再調整
+4. `decision_records` をプロファイルから削除し JSONL に一本化(§3.5)、
+   `DecisionAgent.learn` の戻り値を `(profile, record)` に変更、
+   `review`/`evaluate` の `history_records` を必須引数化、`migrate-history` コマンド追加
+5. `task_types` をプロファイルへ移し `SUPPORTED_TASK_TYPES` ハードコードを廃止(§3.6)
+6. CLI に `--engine` を追加(heuristic のみ受理)
+7. 既存テスト全通過を確認(§3.5/§3.6 の変更は破壊的なので、旧プロファイル・
+   旧 CLI 呼び出しの後方互換テストをこの段階で追加する)
 
 ### Phase 2: データモデル拡張
 
 1. `PreferenceRule` / `PatternEntry` 構造化、`schema_version`、後方互換ロード
 2. `ArtifactReview.engine` フィールド
 3. `rules list/approve/reject/retire` コマンド
-4. 互換テスト・rules テスト追加
+4. `evaluate --history` による `EvaluationRun` 記録、`delta_vs_previous`、
+   `--strict` でのケース ID 欠落検出(§7.6)
+5. 互換テスト・rules テスト追加
 
 ### Phase 3: LLM レビュー(G1)
 

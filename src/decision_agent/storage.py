@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from hashlib import sha256
+import tempfile
 from typing import Any
 
 from decision_agent.models import (
@@ -58,6 +61,11 @@ def load_decision_records(path: str | Path) -> tuple[DecisionRecord, ...]:
     return tuple(records)
 
 
+def load_legacy_profile_decision_records(path: str | Path) -> tuple[DecisionRecord, ...]:
+    data = _load_json(path)
+    return tuple(DecisionRecord.from_dict(item) for item in data.get("decision_records", []))
+
+
 def load_evaluation_cases(path: str | Path) -> tuple[EvaluationCase, ...]:
     cases: list[EvaluationCase] = []
     with Path(path).open("r", encoding="utf-8") as file:
@@ -73,6 +81,9 @@ def load_evaluation_cases(path: str | Path) -> tuple[EvaluationCase, ...]:
 def append_decision_record(path: str | Path, record: DecisionRecord) -> None:
     record_path = Path(path)
     record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_fingerprint = _record_fingerprint(record)
+    if any(_record_fingerprint(existing) == record_fingerprint for existing in load_decision_records(record_path)):
+        return
     with record_path.open("a", encoding="utf-8") as file:
         json.dump(record.to_dict(), file, ensure_ascii=False)
         file.write("\n")
@@ -89,6 +100,26 @@ def _load_json(path: str | Path) -> dict[str, Any]:
 def _save_json(data: dict[str, Any], path: str | Path) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2, ensure_ascii=False)
-        file.write("\n")
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=output_path.parent,
+            delete=False,
+        ) as file:
+            json.dump(data, file, indent=2, ensure_ascii=False)
+            file.write("\n")
+            temp_name = file.name
+        os.replace(temp_name, output_path)
+    finally:
+        if temp_name and Path(temp_name).exists():
+            Path(temp_name).unlink()
+
+
+def _record_fingerprint(record: DecisionRecord) -> str:
+    data = record.to_dict()
+    data.pop("id", None)
+    data.pop("created_at", None)
+    payload = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()
