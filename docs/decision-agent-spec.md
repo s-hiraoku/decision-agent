@@ -23,6 +23,97 @@ how the user judges outputs over repeated iterations.
 
 The central responsibility is judgment, not generation.
 
+## Philosophy
+
+### A model of the user, not a generic filter
+
+Decision Agent's target is not "is this artifact good," but "how closely does
+this match the judgment this specific user would have made." A gatekeeper
+that blocks bad output is a useful side effect, not the goal. The goal is
+fidelity: Decision Agent is a model of one person's judgment criteria, built
+and refined from that person's own decisions.
+
+This is a fidelity target, not an identity claim. Decision Agent does not
+become the user or decide on the user's behalf; it predicts what the user
+would decide, stays inspectable about why, and is explicitly allowed to be
+wrong. "Predicts how the user would respond" (see Core Concept) is the
+honest framing this philosophy commits to — "acts as the user" is not.
+Verdicts, issues, and revision instructions are always framed as a
+prediction of the user's judgment, never as the user's actual decision.
+
+### An opinion, not an echo
+
+When Decision Agent's judgment and the user's actual judgment diverge, the
+default is not to silently overwrite the model with whatever the user just
+said. Decision Agent is expected to hold a consistent judgment logic of its
+own — built from accumulated rules, patterns, and known mistakes — and to
+have a confidence level in that judgment.
+
+- When confidence is low, or the user's feedback conflicts with an
+  established, well-evidenced rule, Decision Agent should surface the
+  conflict and prompt the user to confirm, rather than treat the new
+  feedback as unconditional ground truth.
+- When no confirmation is possible or available — for example, inside an
+  unattended pipeline, or when the user is not present to respond — Decision
+  Agent must still commit to its best judgment at that moment using the
+  current profile. Uncertainty is a reason to record a flag and an
+  explanation alongside the verdict, not a reason to stall or refuse to
+  decide.
+
+This keeps Decision Agent's judgment durable and legible instead of
+thrashing on every new data point, without making the loop dependent on
+constant human availability. It is also why this is not in tension with
+this project's "no fully autonomous taste model" non-goal: surfacing
+low-confidence disagreement for confirmation is the opposite of unchecked
+autonomy — it keeps the human as the decider of record whenever they are
+available, and only falls back to the agent's own best judgment when they
+are not.
+
+This philosophy section states the commitment. How confidence is computed,
+and what a confirmation dialogue looks like, are implementation decisions
+for later work, not settled here.
+
+### The user keeps changing, so the model must keep growing
+
+A user's judgment is not fixed. Taste, priorities, and standards drift over
+time, and sometimes change abruptly. Decision Agent is not trying to
+converge on one final, static model of the user — it is committing to
+staying current with a moving target, indefinitely.
+
+This has direct consequences for how accumulated data is treated:
+
+- **Accumulated judgment is an asset, not a log.** Decision records, known
+  mistakes, and preference rules are not disposable history kept for
+  debugging; they are the durable, inspectable representation of this one
+  person's judgment criteria. That representation is worth carrying across
+  task types and, eventually, across tools, not just replaying inside a
+  single review loop.
+- **Promotion is earned by repetition and low contradiction, not by a
+  single instance.** A single delta between agent and user judgment is a
+  signal, not a rule. A pattern becomes durable enough to trust — worth
+  promoting from raw record to preference rule or known mistake — when it
+  recurs across distinct records without being contradicted by other
+  evidence. Provenance and hit/miss tracking are meant to make this
+  judgment always re-examinable, not just trusted forever once made.
+- **Staleness is suspected, not assumed away.** Because the user's judgment
+  drifts, a rule that goes long unused, or that starts getting repeatedly
+  contradicted by new feedback, should be flagged for reconsideration
+  rather than left to quietly govern future reviews. Retiring a rule is
+  always a reviewable action, never a silent deletion — this is why
+  lifecycle status and retirement are explicit and inspectable rather than
+  automatic.
+- **The storage substrate exists to serve this growth, not the reverse.**
+  Whatever the accumulated judgment is stored in must remain durable,
+  append-only at the evidence layer, and human-inspectable, so that the
+  model of the user can be re-derived, audited, or rebuilt later. The
+  specific format (JSONL today) is an implementation detail; the
+  requirement that history is never silently lost or rewritten is not.
+
+Personal judgment data is also personal: the accumulated model belongs to
+the one person whose judgment it represents. It is inspectable and portable
+by that person's choice, not a shared or multi-tenant asset — consistent
+with this project's existing "no multi-user account management" non-goal.
+
 For day-to-day usage, see [Operation Guide](operation-guide.md). This document
 defines the data model and behavior; the operation guide explains how to run the
 review, iteration, and evaluation loop. For the implementation-level design that
@@ -285,16 +376,25 @@ Supported verdicts:
 
 The first implementation should learn from explicit feedback.
 
-Feedback loop:
+Feedback loop (target behavior; see "Still incomplete" for what today's
+implementation actually enforces versus what is stated here as intent):
 
 1. Store the agent's review.
 2. Store the user's actual judgment.
 3. Compare the two.
 4. Extract a judgment delta.
-5. Convert durable deltas into preference rules, negative patterns, or positive examples.
-6. Promote verdict mismatches into known mistakes.
-7. Append the raw decision record to JSONL.
-8. Use the updated profile and same-task records in the next review.
+5. If the delta is a single instance, or conflicts with an established,
+   well-evidenced rule, treat it as a candidate signal rather than an
+   immediate promotion — per Philosophy, this is where low-confidence
+   disagreement should be surfaced for confirmation when a user is
+   available to respond.
+6. Convert deltas that recur across distinct records without contradiction
+   into preference rules, negative patterns, or positive examples.
+7. Promote verdict mismatches into known mistakes once they are similarly
+   durable, not on first occurrence.
+8. Append the raw decision record to JSONL regardless of promotion status —
+   the raw evidence is always preserved even when nothing is promoted yet.
+9. Use the updated profile and same-task records in the next review.
 
 The key learning unit is not a final score. It is the difference between what the
 agent thought and what the user actually judged.
@@ -363,6 +463,18 @@ Still incomplete:
 - stronger extraction of durable preference rules from free-form feedback
 - stronger semantic matching for evaluation beyond heuristic text similarity
 - deeper optimization for user-aligned judgment, not only numeric scoring
+- the Philosophy section's promotion principle (recurrence across distinct
+  records, without contradiction, before a rule is trusted) is not yet
+  implemented: today a single verdict mismatch immediately creates a
+  `KnownMistake`, and new preference rules/patterns default to `active`
+  status rather than `candidate`. Status transitions are currently manual
+  only (`rules approve`/`reject`/`retire`), with no automated
+  recurrence, confidence, contradiction, or staleness gating yet
+- `hit_count`/`miss_count` fields exist on rules but are not yet
+  incremented or read by any review or learning logic
+- the Philosophy section's confidence-bearing disagreement (surfacing
+  low-confidence or contradicting feedback for user confirmation) is not
+  implemented; `learn` currently accepts and stores feedback unconditionally
 
 ## Success Criteria
 
