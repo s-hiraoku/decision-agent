@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from hashlib import sha256
 import tempfile
-from typing import Any
+from typing import Any, cast
 
 from decision_agent.models import (
     Alternative,
@@ -94,7 +94,7 @@ def _load_json(path: str | Path) -> dict[str, Any]:
         data = json.load(file)
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a JSON object")
-    return data
+    return {str(key): value for key, value in cast("dict[Any, Any]", data).items()}
 
 
 def _save_json(data: dict[str, Any], path: str | Path) -> None:

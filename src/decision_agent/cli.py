@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+from typing import TypeVar
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
@@ -167,15 +168,8 @@ def main(argv: list[str] | None = None) -> int:
                 for item in rules:
                     print(
                         "\t".join(
-                            (
-                                item["id"],
-                                item["kind"],
-                                item["status"],
-                                item["source"],
-                                str(item["hit_count"]),
-                                str(item["miss_count"]),
-                                item["text"],
-                            )
+                            str(item[key])
+                            for key in ("id", "kind", "status", "source", "hit_count", "miss_count", "text")
                         )
                     )
             return 0
@@ -204,7 +198,7 @@ def _add_engine_arguments(command_parser: argparse.ArgumentParser) -> None:
     command_parser.add_argument("--model", help="LLM model name. Reserved for the llm engine.")
 
 
-def _agent(profile, args: argparse.Namespace, parser: argparse.ArgumentParser) -> DecisionAgent:
+def _agent(profile: DecisionProfile, args: argparse.Namespace, parser: argparse.ArgumentParser) -> DecisionAgent:
     _engine_name(args, parser)
     return DecisionAgent(
         profile,
@@ -282,7 +276,15 @@ def _update_rule(
     )
 
 
-def _update_entry(entry, rule_id: str, action: str, parser: argparse.ArgumentParser):
+RuleEntry = TypeVar("RuleEntry", PreferenceRule, PatternEntry)
+
+
+def _update_entry(
+    entry: RuleEntry,
+    rule_id: str,
+    action: str,
+    parser: argparse.ArgumentParser,
+) -> tuple[RuleEntry | None, bool]:
     if entry.id != rule_id:
         return entry, False
 
@@ -297,6 +299,7 @@ def _update_entry(entry, rule_id: str, action: str, parser: argparse.ArgumentPar
     if action == "retire":
         return replace(entry, status="retired"), True
     parser.error(f"unknown rules command: {action}")
+    raise AssertionError("unreachable")
 
 
 def _profile_rule_groups(profile: DecisionProfile):

@@ -13,5 +13,13 @@ dependencies = []
 [project.scripts]
 decision-agent = "decision_agent.cli:main"
 
+[dependency-groups]
+dev = ["pyright>=1.1"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+pythonVersion = "3.11"

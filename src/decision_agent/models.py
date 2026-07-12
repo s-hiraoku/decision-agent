@@ -2,7 +2,37 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
+
+
+def _get(data: dict[str, Any], key: str, default: object = None) -> object:
+    return data.get(key, default)
+
+
+def _get_list(data: dict[str, Any], key: str) -> list[Any]:
+    value = data.get(key, [])
+    if not isinstance(value, list):
+        raise TypeError(f"{key} must be a list")
+    return cast("list[Any]", value)
+
+
+def _get_dict_list(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    return [_as_str_dict(item) for item in _get_list(data, key)]
+
+
+def _get_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
+    return _as_str_dict(data.get(key, {}))
+
+
+def _require_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
+    return _as_str_dict(data[key])
+
+
+def _as_str_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError("expected an object")
+    typed = cast("dict[Any, Any]", value)
+    return {str(k): v for k, v in typed.items()}
 
 
 Attributes = dict[str, float]
@@ -21,7 +51,7 @@ class Alternative:
     def from_dict(cls, data: dict[str, Any]) -> "Alternative":
         return cls(
             name=str(data["name"]),
-            attributes={str(key): float(value) for key, value in data.get("attributes", {}).items()},
+            attributes={str(key): float(value) for key, value in _get_dict(data, "attributes").items()},
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -39,11 +69,11 @@ class DecisionExample:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DecisionExample":
         return cls(
-            context=str(data.get("context", "")),
-            alternatives=tuple(Alternative.from_dict(item) for item in data.get("alternatives", [])),
+            context=str(_get(data, "context", "")),
+            alternatives=tuple(Alternative.from_dict(item) for item in _get_dict_list(data, "alternatives")),
             chosen=str(data["chosen"]),
-            rejected=tuple(str(item) for item in data.get("rejected", ())),
-            rationale=str(data.get("rationale", "")),
+            rejected=tuple(str(item) for item in _get_list(data, "rejected")),
+            rationale=str(_get(data, "rationale", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -79,21 +109,22 @@ class PreferenceRule:
             return cls(text=value, id=_stable_entry_id("preference_rule", value))
         if not isinstance(value, dict):
             raise TypeError("preference rule must be a string or object")
+        value = _as_str_dict(cast("Any", value))
 
-        text = str(value.get("text", ""))
-        status = str(value.get("status", "active"))
+        text = str(_get(value, "text", ""))
+        status = str(_get(value, "status", "active"))
         if status not in SUPPORTED_RULE_STATUSES:
             raise ValueError(f"unsupported rule status: {status}")
         return cls(
             text=text,
-            id=str(value.get("id") or _stable_entry_id("preference_rule", text)),
-            task_types=tuple(str(item) for item in value.get("task_types", [])),
+            id=str(_get(value, "id") or _stable_entry_id("preference_rule", text)),
+            task_types=tuple(str(item) for item in _get_list(value, "task_types")),
             status=status,
-            source=str(value.get("source", "user")),
-            source_record_id=str(value.get("source_record_id", "")),
+            source=str(_get(value, "source", "user")),
+            source_record_id=str(_get(value, "source_record_id", "")),
             hit_count=int(value.get("hit_count", 0)),
             miss_count=int(value.get("miss_count", 0)),
-            created_at=str(value.get("created_at", "")),
+            created_at=str(_get(value, "created_at", "")),
         )
 
     def applies_to(self, task_type: str) -> bool:
@@ -146,21 +177,22 @@ class PatternEntry:
             return cls(text=value, id=_stable_entry_id(kind, value))
         if not isinstance(value, dict):
             raise TypeError(f"{kind} must be a string or object")
+        value = _as_str_dict(cast("Any", value))
 
-        text = str(value.get("text", ""))
-        status = str(value.get("status", "active"))
+        text = str(_get(value, "text", ""))
+        status = str(_get(value, "status", "active"))
         if status not in SUPPORTED_RULE_STATUSES:
             raise ValueError(f"unsupported rule status: {status}")
         return cls(
             text=text,
-            id=str(value.get("id") or _stable_entry_id(kind, text)),
-            task_types=tuple(str(item) for item in value.get("task_types", [])),
+            id=str(_get(value, "id") or _stable_entry_id(kind, text)),
+            task_types=tuple(str(item) for item in _get_list(value, "task_types")),
             status=status,
-            source=str(value.get("source", "user")),
-            source_record_id=str(value.get("source_record_id", "")),
+            source=str(_get(value, "source", "user")),
+            source_record_id=str(_get(value, "source_record_id", "")),
             hit_count=int(value.get("hit_count", 0)),
             miss_count=int(value.get("miss_count", 0)),
-            created_at=str(value.get("created_at", "")),
+            created_at=str(_get(value, "created_at", "")),
         )
 
     def applies_to(self, task_type: str) -> bool:
@@ -226,19 +258,23 @@ class DecisionProfile:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DecisionProfile":
         return cls(
-            user_id=str(data.get("user_id", "user")),
-            criteria={str(key): float(value) for key, value in data.get("criteria", {}).items()},
+            user_id=str(_get(data, "user_id", "user")),
+            criteria={str(key): float(value) for key, value in _get_dict(data, "criteria").items()},
             schema_version=PROFILE_SCHEMA_VERSION,
-            examples=tuple(DecisionExample.from_dict(item) for item in data.get("examples", [])),
-            preference_rules=tuple(PreferenceRule.from_value(item) for item in data.get("preference_rules", [])),
+            examples=tuple(DecisionExample.from_dict(item) for item in _get_dict_list(data, "examples")),
+            preference_rules=tuple(PreferenceRule.from_value(item) for item in _get_list(data, "preference_rules")),
             negative_patterns=tuple(
-                PatternEntry.from_value(item, kind="negative_pattern") for item in data.get("negative_patterns", [])
+                PatternEntry.from_value(item, kind="negative_pattern")
+                for item in _get_list(data, "negative_patterns")
             ),
             positive_examples=tuple(
-                PatternEntry.from_value(item, kind="positive_example") for item in data.get("positive_examples", [])
+                PatternEntry.from_value(item, kind="positive_example")
+                for item in _get_list(data, "positive_examples")
             ),
-            known_mistakes=tuple(KnownMistake.from_dict(item) for item in data.get("known_mistakes", [])),
-            decision_records=tuple(DecisionRecord.from_dict(item) for item in data.get("decision_records", [])),
+            known_mistakes=tuple(KnownMistake.from_dict(item) for item in _get_dict_list(data, "known_mistakes")),
+            decision_records=tuple(
+                DecisionRecord.from_dict(item) for item in _get_dict_list(data, "decision_records")
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -259,7 +295,7 @@ class DecisionProfile:
 class DecisionResult:
     recommended: str
     scores: dict[str, float]
-    explanations: dict[str, list[str]] = field(default_factory=dict)
+    explanations: dict[str, list[str]] = field(default_factory=lambda: cast("dict[str, list[str]]", {}))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -274,7 +310,7 @@ class ArtifactReviewRequest:
     task_type: str
     intent: str
     artifact: str
-    context: dict[str, str] = field(default_factory=dict)
+    context: dict[str, str] = field(default_factory=lambda: cast("dict[str, str]", {}))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ArtifactReviewRequest":
@@ -283,9 +319,9 @@ class ArtifactReviewRequest:
             raise ValueError(f"unsupported task_type: {task_type}")
         return cls(
             task_type=task_type,
-            intent=str(data.get("intent", "")),
-            artifact=str(data.get("artifact", "")),
-            context={str(key): str(value) for key, value in data.get("context", {}).items()},
+            intent=str(_get(data, "intent", "")),
+            artifact=str(_get(data, "artifact", "")),
+            context={str(key): str(value) for key, value in _get_dict(data, "context").items()},
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -307,10 +343,10 @@ class ReviewIssue:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewIssue":
         return cls(
-            severity=str(data.get("severity", "medium")),
-            reason=str(data.get("reason", "")),
-            suggestion=str(data.get("suggestion", "")),
-            violated_rule_id=str(data.get("violated_rule_id", "")),
+            severity=str(_get(data, "severity", "medium")),
+            reason=str(_get(data, "reason", "")),
+            suggestion=str(_get(data, "suggestion", "")),
+            violated_rule_id=str(_get(data, "violated_rule_id", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -334,17 +370,17 @@ class ArtifactReview:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ArtifactReview":
-        verdict = str(data.get("verdict", "revise"))
+        verdict = str(_get(data, "verdict", "revise"))
         if verdict not in SUPPORTED_VERDICTS:
             raise ValueError(f"unsupported verdict: {verdict}")
         return cls(
             verdict=verdict,
             confidence=float(data.get("confidence", 0.0)),
-            summary=str(data.get("summary", "")),
-            issues=tuple(ReviewIssue.from_dict(item) for item in data.get("issues", [])),
-            revision_instruction=str(data.get("revision_instruction", "")),
-            learned_signals=tuple(str(item) for item in data.get("learned_signals", [])),
-            engine=str(data.get("engine", "")),
+            summary=str(_get(data, "summary", "")),
+            issues=tuple(ReviewIssue.from_dict(item) for item in _get_dict_list(data, "issues")),
+            revision_instruction=str(_get(data, "revision_instruction", "")),
+            learned_signals=tuple(str(item) for item in _get_list(data, "learned_signals")),
+            engine=str(_get(data, "engine", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -371,17 +407,17 @@ class UserFeedback:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "UserFeedback":
-        verdict = str(data.get("verdict", "revise"))
+        verdict = str(_get(data, "verdict", "revise"))
         if verdict not in SUPPORTED_VERDICTS:
             raise ValueError(f"unsupported verdict: {verdict}")
         return cls(
             verdict=verdict,
-            notes=str(data.get("notes", "")),
-            preference_rules=tuple(str(item) for item in data.get("preference_rules", [])),
-            negative_patterns=tuple(str(item) for item in data.get("negative_patterns", [])),
-            positive_examples=tuple(str(item) for item in data.get("positive_examples", [])),
-            core_issues=_string_tuple(data.get("core_issues", []), field_name="core_issues"),
-            revision_direction=str(data.get("revision_direction", "")),
+            notes=str(_get(data, "notes", "")),
+            preference_rules=tuple(str(item) for item in _get_list(data, "preference_rules")),
+            negative_patterns=tuple(str(item) for item in _get_list(data, "negative_patterns")),
+            positive_examples=tuple(str(item) for item in _get_list(data, "positive_examples")),
+            core_issues=_string_tuple(_get(data, "core_issues", []), field_name="core_issues"),
+            revision_direction=str(_get(data, "revision_direction", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -405,8 +441,8 @@ class KnownMistake:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "KnownMistake":
         return cls(
-            pattern=str(data.get("pattern", "")),
-            correction=str(data.get("correction", "")),
+            pattern=str(_get(data, "pattern", "")),
+            correction=str(_get(data, "correction", "")),
             count=int(data.get("count", 1)),
         )
 
@@ -430,12 +466,12 @@ class DecisionRecord:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DecisionRecord":
         return cls(
-            request=ArtifactReviewRequest.from_dict(data["request"]),
-            agent_review=ArtifactReview.from_dict(data["agent_review"]),
-            user_feedback=UserFeedback.from_dict(data["user_feedback"]),
-            delta=str(data.get("delta", "")),
-            id=str(data.get("id", "")),
-            created_at=str(data.get("created_at", "")),
+            request=ArtifactReviewRequest.from_dict(_require_dict(data, "request")),
+            agent_review=ArtifactReview.from_dict(_require_dict(data, "agent_review")),
+            user_feedback=UserFeedback.from_dict(_require_dict(data, "user_feedback")),
+            delta=str(_get(data, "delta", "")),
+            id=str(_get(data, "id", "")),
+            created_at=str(_get(data, "created_at", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -458,9 +494,9 @@ class EvaluationCase:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvaluationCase":
         return cls(
-            request=ArtifactReviewRequest.from_dict(data["request"]),
-            user_judgment=UserFeedback.from_dict(data["user_judgment"]),
-            id=str(data.get("id", "")),
+            request=ArtifactReviewRequest.from_dict(_require_dict(data, "request")),
+            user_judgment=UserFeedback.from_dict(_require_dict(data, "user_judgment")),
+            id=str(_get(data, "id", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -523,7 +559,8 @@ def _string_tuple(value: Any, *, field_name: str) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
     if isinstance(value, (list, tuple)):
-        return tuple(str(item) for item in value)
+        items = cast("list[Any] | tuple[Any, ...]", value)
+        return tuple(str(item) for item in items)
     raise TypeError(f"{field_name} must be a string, list, or tuple")
 
 

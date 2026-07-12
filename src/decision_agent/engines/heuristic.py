@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 import re
 
 from decision_agent.engines import AgreementJudgment, CoreIssueJudgment
@@ -229,8 +228,8 @@ def _is_meaningful_char(char: str) -> bool:
 
 def _review_confidence(
     issues: list[ReviewIssue],
-    matched_rules: list[str],
-    positive_matches: list[str],
+    matched_rules: list[PreferenceRule | PatternEntry],
+    positive_matches: list[PreferenceRule | PatternEntry],
 ) -> float:
     score = 0.45 + 0.08 * len(matched_rules) + 0.05 * len(positive_matches) + 0.04 * len(issues)
     return round(max(0.2, min(0.9, score)), 2)
@@ -239,8 +238,8 @@ def _review_confidence(
 def _review_summary(
     verdict: str,
     issues: list[ReviewIssue],
-    matched_rules: list[str],
-    positive_matches: list[str],
+    matched_rules: list[PreferenceRule | PatternEntry],
+    positive_matches: list[PreferenceRule | PatternEntry],
 ) -> str:
     if verdict == "accept":
         return "artifact appears aligned with the stored user preference profile"

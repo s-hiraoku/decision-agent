@@ -160,6 +160,12 @@ Run tests:
 PYTHONPATH=src python -m unittest discover -s tests
 ```
 
+Run strict type checking (`pyright`, via `uv`):
+
+```bash
+uv run pyright
+```
+
 Create a demo recommendation:
 
 ```bash

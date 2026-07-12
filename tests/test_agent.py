@@ -93,8 +93,8 @@ class DecisionAgentTest(unittest.TestCase):
         profile = DecisionProfile(
             user_id="u1",
             criteria={},
-            preference_rules=("put a concrete pain point before abstract concept explanation",),
-            negative_patterns=("abstract explanation before concrete problem",),
+            preference_rules=(PreferenceRule(text="put a concrete pain point before abstract concept explanation"),),
+            negative_patterns=(PatternEntry(text="abstract explanation before concrete problem"),),
         )
         request = ArtifactReviewRequest(
             task_type="blog_outline",
@@ -138,7 +138,7 @@ class DecisionAgentTest(unittest.TestCase):
         profile = DecisionProfile(
             user_id="u1",
             criteria={},
-            negative_patterns=("抽象概念を先に説明",),
+            negative_patterns=(PatternEntry(text="抽象概念を先に説明"),),
         )
         request = ArtifactReviewRequest(
             task_type="blog_outline",
@@ -158,7 +158,7 @@ class DecisionAgentTest(unittest.TestCase):
         profile = DecisionProfile(
             user_id="u1",
             criteria={},
-            negative_patterns=("注意",),
+            negative_patterns=(PatternEntry(text="注意"),),
         )
         request = ArtifactReviewRequest(
             task_type="blog_outline",
@@ -179,7 +179,7 @@ class DecisionAgentTest(unittest.TestCase):
             DecisionProfile(
                 user_id="u1",
                 criteria={},
-                negative_patterns=("抽象概念を先に説明",),
+                negative_patterns=(PatternEntry(text="抽象概念を先に説明"),),
             )
         ).review(
             ArtifactReviewRequest(
