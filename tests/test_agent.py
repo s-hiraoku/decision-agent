@@ -380,6 +380,43 @@ class DecisionAgentTest(unittest.TestCase):
 
         self.assertTrue(any("important similar artifact feedback" in issue.reason for issue in review.issues))
 
+    def test_review_is_deterministic_for_the_same_input(self) -> None:
+        profile = DecisionProfile(
+            user_id="u1",
+            criteria={},
+            preference_rules=(PreferenceRule(text="put a concrete pain point before abstract concept explanation"),),
+            negative_patterns=(PatternEntry(text="abstract explanation before concrete problem"),),
+        )
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "This post defines the concept first. It then explains loop engineering and describes "
+                "why preference profiles can make agents better over repeated iterations."
+            ),
+        )
+        history = tuple(
+            DecisionRecord(
+                request=ArtifactReviewRequest(
+                    task_type="blog_outline",
+                    intent="write about Decision Agent",
+                    artifact=f"Past draft {index} about Decision Agent structure and feedback loops.",
+                ),
+                agent_review=ArtifactReview(verdict="revise", confidence=0.5, summary="needs work"),
+                user_feedback=UserFeedback(verdict="revise", notes=f"note {index}"),
+                delta="agent verdict matched user feedback",
+                id=f"record-{index}",
+                created_at=f"2024-01-{index + 1:02d}T00:00:00+00:00",
+            )
+            for index in range(3)
+        )
+        agent = DecisionAgent(profile)
+
+        first = agent.review(request, history_records=history)
+        second = agent.review(request, history_records=history)
+
+        self.assertEqual(first.to_dict(), second.to_dict())
+
     def test_decision_records_round_trip_as_jsonl(self) -> None:
         profile = DecisionProfile(user_id="u1", criteria={})
         request = ArtifactReviewRequest(

@@ -263,6 +263,16 @@ def _relevant_records(
     request: ArtifactReviewRequest,
     records: tuple[DecisionRecord, ...],
 ) -> list[DecisionRecord]:
+    """Rank same-task-type records by similarity to the incoming request.
+
+    `created_at` is a deliberate tie-break, not an accidental side effect of
+    sort key order: when two past records are equally similar, the more
+    recent one is preferred as precedent. This means the top-ranked records
+    for an unchanged artifact can change as new, equally-similar records are
+    appended over time -- that is the intended recency preference, not a
+    retrieval-stability bug. See Philosophy in decision-agent-spec.md for the
+    durability-vs-retrieval-stability boundary this implies.
+    """
     same_task = [record for record in records if record.request.task_type == request.task_type]
     return sorted(
         same_task,

@@ -108,6 +108,21 @@ This has direct consequences for how accumulated data is treated:
   model of the user can be re-derived, audited, or rebuilt later. The
   specific format (JSONL today) is an implementation detail; the
   requirement that history is never silently lost or rewritten is not.
+- **Durability of the asset is not the same claim as stability of
+  retrieval over it.** The stored rules and records are durable and
+  append-only — that guarantee is real today. It is a separate, stronger
+  claim that *ranking or retrieval* over an ever-growing asset always
+  surfaces the same result for the same input, and the MVP does not make
+  that stronger claim: as more rules and records accumulate, which past
+  precedent or rule is judged "most relevant" can shift (for example, a
+  deliberate recency preference when two past records are equally similar
+  means an unchanged artifact can end up citing a different, newer
+  precedent as more similar records are recorded). This is a named MVP
+  boundary, not a silent gap: it should be revisited — with real
+  retrieval-stability guarantees, not just a growing heuristic scan — once
+  a same-input review is ever observed to flip verdict on an unchanged
+  profile, or once a single task type's active rule count grows large
+  enough that accidental threshold matches become a practical problem.
 
 Personal judgment data is also personal: the accumulated model belongs to
 the one person whose judgment it represents. It is inspectable and portable
@@ -475,6 +490,10 @@ Still incomplete:
 - the Philosophy section's confidence-bearing disagreement (surfacing
   low-confidence or contradicting feedback for user confirmation) is not
   implemented; `learn` currently accepts and stores feedback unconditionally
+- retrieval-stability guarantees beyond the deliberate recency tie-break in
+  `_relevant_records` are out of scope for the MVP; there is a same-input
+  determinism test as a regression guard, but no vector index, embedding
+  cache, or accumulation-scale-aware thresholding
 
 ## Success Criteria
 
