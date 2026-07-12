@@ -33,6 +33,27 @@ ATTRIBUTE_SCALE = 10.0
 MEMORY_WEIGHT = 0.25
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 
+# Per Philosophy ("An opinion, not an echo"): the agent should surface, not
+# silently accept, feedback that conflicts with an established rule or that
+# it had little confidence to begin with. These two conditions share one
+# vocabulary (flagged_reason) but differ in mechanical effect:
+#   - FLAG_CONTRADICTS_ESTABLISHED_RULE withholds the new signal's effect --
+#     an established (active) entry keeps governing reviews unchanged (its
+#     correction/corrected_verdict are not overwritten); a new candidate
+#     created from conflicting feedback simply stays an unpromoted candidate.
+#     Either way the flag has real teeth, and resolving it is a manual
+#     `rules approve`/`reject` action.
+#   - FLAG_LOW_CONFIDENCE_DISAGREEMENT is informational only: the record and
+#     any promotion still proceed normally (promote-but-annotate), so it
+#     never blocks the non-interactive learn()/iterate() flow.
+FLAG_CONTRADICTS_ESTABLISHED_RULE = "contradicts_established_rule"
+FLAG_LOW_CONFIDENCE_DISAGREEMENT = "low_confidence_disagreement"
+
+# Uncalibrated placeholder: below this, a verdict disagreement is flagged as
+# low-confidence. No usage data yet informs this number; revisit once real
+# review/feedback volume exists.
+LOW_CONFIDENCE_THRESHOLD = 0.5
+
 
 class DecisionAgent:
     def __init__(
@@ -125,6 +146,7 @@ class DecisionAgent:
             delta=delta,
             id=record_id,
             created_at=datetime.now(UTC).isoformat(),
+            flagged_reason=_low_confidence_disagreement_flag(agent_review, user_feedback),
         )
 
         negative_patterns = _append_pattern_entries(
@@ -294,6 +316,18 @@ def _feedback_delta(agent_review: ArtifactReview, user_feedback: UserFeedback) -
     return f"agent predicted {agent_review.verdict}, user judged {user_feedback.verdict}: {user_feedback.notes}"
 
 
+def _low_confidence_disagreement_flag(agent_review: ArtifactReview, user_feedback: UserFeedback) -> str:
+    """Promote-but-annotate: record is stored and promotion proceeds normally,
+    this only marks that the agent's own confidence was already low when it
+    disagreed with the user -- informational, never blocking (see Philosophy).
+    """
+    if agent_review.verdict == user_feedback.verdict:
+        return ""
+    if agent_review.confidence < LOW_CONFIDENCE_THRESHOLD:
+        return FLAG_LOW_CONFIDENCE_DISAGREEMENT
+    return ""
+
+
 def _evaluation_profile_updates(
     case: EvaluationCase,
     review: ArtifactReview,
@@ -374,14 +408,33 @@ def _update_known_mistakes(
             continue
 
         matched = True
-        if mistake.status == "active" or record_id in mistake.source_record_ids:
+        if record_id in mistake.source_record_ids:
             values.append(replace(mistake, count=mistake.count + 1, correction=correction or mistake.correction))
             continue
 
         contradicted = bool(mistake.corrected_verdict) and mistake.corrected_verdict != corrected_verdict
+        if contradicted and mistake.status == "active":
+            # Conflicts with an established (active), well-evidenced rule --
+            # per Philosophy, surface this for confirmation rather than
+            # silently overwriting it. The established correction/verdict
+            # stay in effect (and the rule keeps applying to reviews) while
+            # the new, conflicting signal waits as `pending_*`. Resolving is
+            # a manual `rules approve` (keep the established rule, discard
+            # the new signal) or `rules reject` (accept the new signal,
+            # overwrite the established correction/verdict) action.
+            values.append(
+                replace(
+                    mistake,
+                    count=mistake.count + 1,
+                    flagged_reason=FLAG_CONTRADICTS_ESTABLISHED_RULE,
+                    pending_correction=correction,
+                    pending_corrected_verdict=corrected_verdict,
+                )
+            )
+            continue
         if contradicted:
-            # A same_pattern mistake recurred but the user corrected it toward a
-            # different verdict this time -- do not let it promote silently.
+            # Conflicts with a still-candidate (not yet established) mistake --
+            # this is ordinary non-promotion, not a confirmation-worthy event.
             values.append(replace(mistake, count=mistake.count + 1))
             continue
 
@@ -514,13 +567,23 @@ def _append_pattern_entries(
     for item in additions:
         if not item:
             continue
-        if any(same_pattern(item, other.text) for other in opposite_polarity):
+        opposing_match = next((other for other in opposite_polarity if same_pattern(item, other.text)), None)
+        if opposing_match is not None:
             # Recurs against an opposite-polarity entry (e.g. now praising what was
             # previously flagged as a negative pattern) -- a real, cheap contradiction
             # signal, so this stays a fresh, unpromoted candidate rather than merging.
+            # Only an ESTABLISHED (active) opposing entry is confirmation-worthy per
+            # Philosophy; a candidate-vs-candidate clash is ordinary non-promotion.
+            flagged_reason = FLAG_CONTRADICTS_ESTABLISHED_RULE if opposing_match.status == "active" else ""
             values.append(
                 PatternEntry.from_value(
-                    {"text": item, "source": "feedback", "status": "candidate", "source_record_ids": [record_id]},
+                    {
+                        "text": item,
+                        "source": "feedback",
+                        "status": "candidate",
+                        "source_record_ids": [record_id],
+                        "flagged_reason": flagged_reason,
+                    },
                     kind=kind,
                 )
             )

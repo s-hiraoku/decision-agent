@@ -8,9 +8,9 @@ from pathlib import Path
 import sys
 from typing import TypeVar
 
-from decision_agent.agent import RECURRENCE_THRESHOLD, DecisionAgent
+from decision_agent.agent import FLAG_CONTRADICTS_ESTABLISHED_RULE, RECURRENCE_THRESHOLD, DecisionAgent
 from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
-from decision_agent.models import DecisionProfile, KnownMistake, PatternEntry, PreferenceRule
+from decision_agent.models import DecisionProfile, DecisionRecord, KnownMistake, PatternEntry, PreferenceRule
 from decision_agent.storage import (
     append_decision_record,
     load_decision_records,
@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         save_profile(learned, args.output)
         print(
             json.dumps(
-                _learning_summary(learned, learned.decision_records[-1].id),
+                _learning_summary(learned, learned.decision_records[-1]),
                 indent=2,
                 ensure_ascii=False,
             ),
@@ -150,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
                     "record": learned.decision_records[-1].to_dict(),
                     "profile": str(args.output),
                     "records": str(args.records),
-                    "learning": _learning_summary(learned, learned.decision_records[-1].id),
+                    "learning": _learning_summary(learned, learned.decision_records[-1]),
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -187,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "hit_count",
                                 "miss_count",
                                 "staleness",
+                                "flagged_reason",
                                 "text",
                             )
                         )
@@ -235,27 +236,57 @@ def _engine_name(args: argparse.Namespace, parser: argparse.ArgumentParser) -> s
     return engine
 
 
-def _learning_summary(profile: DecisionProfile, record_id: str) -> dict[str, object]:
-    """Report what this learn() call did to candidate/active rule status.
+def _flag_resolution_effect(entry: PreferenceRule | PatternEntry | KnownMistake) -> str:
+    """Spell out what approve/reject concretely do for this flagged entry.
 
-    Per Philosophy, a rule taught in one learn() call may stay a candidate
-    that does not yet apply to reviews -- this surfaces that explicitly so
-    it reads as expected behavior, not a silent regression.
+    For an ordinary flagged candidate, approve promotes the new thing and
+    reject discards it -- the usual meaning. For a contradiction flagged
+    against an already-established (active) entry, that mapping inverts:
+    approve keeps the established rule and discards the new conflicting
+    signal, reject accepts the new signal and overwrites the established
+    one. Spelling this out avoids requiring the user to have internalized
+    the inversion before running the command.
+    """
+    if entry.status == "active":
+        return "approve = keep established (discard new signal); reject = accept new signal (overwrite established)"
+    return "approve = promote this candidate; reject = discard this candidate"
+
+
+def _learning_summary(profile: DecisionProfile, record: DecisionRecord) -> dict[str, object]:
+    """Report what this learn() call did to candidate/active rule status,
+    and which entries anywhere in the profile still await a confirmation
+    decision. Per Philosophy, a rule taught in one learn() call may stay a
+    candidate that does not yet apply to reviews -- this surfaces that
+    explicitly so it reads as expected behavior, not a silent regression.
     """
     touched: list[dict[str, object]] = []
+    needs_confirmation: list[dict[str, object]] = []
     for kind, entries in (
         *_profile_rule_groups(profile),
         ("known_mistake", profile.known_mistakes),
     ):
         for entry in entries:
-            if record_id not in entry.source_record_ids:
-                continue
-            distinct_records = len(set(entry.source_record_ids))
-            remaining = max(0, RECURRENCE_THRESHOLD - distinct_records)
             if isinstance(entry, KnownMistake):
                 identifier, text = entry.pattern, entry.pattern
             else:
                 identifier, text = entry.id, entry.text
+
+            if entry.flagged_reason:
+                needs_confirmation.append(
+                    {
+                        "kind": kind,
+                        "id": identifier,
+                        "flagged_reason": entry.flagged_reason,
+                        "text": text,
+                        "resolve_with": f"rules approve|reject {identifier}",
+                        "effect": _flag_resolution_effect(entry),
+                    }
+                )
+
+            if record.id not in entry.source_record_ids:
+                continue
+            distinct_records = len(set(entry.source_record_ids))
+            remaining = max(0, RECURRENCE_THRESHOLD - distinct_records)
             touched.append(
                 {
                     "kind": kind,
@@ -266,7 +297,11 @@ def _learning_summary(profile: DecisionProfile, record_id: str) -> dict[str, obj
                     "text": text,
                 }
             )
-    return {"touched_rules": touched}
+
+    result: dict[str, object] = {"touched_rules": touched, "needs_confirmation": needs_confirmation}
+    if record.flagged_reason:
+        result["this_record_flagged_reason"] = record.flagged_reason
+    return result
 
 
 def _rule_rows(profile: DecisionProfile, *, status: str | None = None) -> list[dict[str, object]]:
@@ -285,6 +320,7 @@ def _rule_rows(profile: DecisionProfile, *, status: str | None = None) -> list[d
                     "miss_count": entry.miss_count,
                     "text": entry.text,
                     "staleness": _staleness_flag(entry),
+                    "flagged_reason": entry.flagged_reason,
                 }
             )
     return rows
@@ -338,6 +374,13 @@ def _update_rule(
         if replacement is not None:
             positive_examples.append(replacement)
 
+    known_mistakes: list[KnownMistake] = []
+    for mistake in profile.known_mistakes:
+        replacement, changed = _update_known_mistake(mistake, rule_id, action, parser)
+        updated = updated or changed
+        if replacement is not None:
+            known_mistakes.append(replacement)
+
     if not updated:
         parser.error(f"rule not found: {rule_id}")
 
@@ -346,7 +389,57 @@ def _update_rule(
         preference_rules=tuple(preference_rules),
         negative_patterns=tuple(negative_patterns),
         positive_examples=tuple(positive_examples),
+        known_mistakes=tuple(known_mistakes),
     )
+
+
+def _update_known_mistake(
+    mistake: KnownMistake,
+    rule_id: str,
+    action: str,
+    parser: argparse.ArgumentParser,
+) -> tuple[KnownMistake | None, bool]:
+    # KnownMistake has no stable id field; `rules list`/`_learning_summary`
+    # already use `pattern` as its identifier, so resolution matches on it too.
+    if mistake.pattern != rule_id:
+        return mistake, False
+
+    if mistake.flagged_reason == FLAG_CONTRADICTS_ESTABLISHED_RULE and mistake.status == "active":
+        # A flagged, already-established mistake: approve keeps the
+        # established correction/verdict and discards the new conflicting
+        # signal; reject accepts the new signal and overwrites the
+        # established correction/verdict. Either way the flag clears.
+        if action == "approve":
+            return replace(mistake, flagged_reason="", pending_correction="", pending_corrected_verdict=""), True
+        if action == "reject":
+            return (
+                replace(
+                    mistake,
+                    correction=mistake.pending_correction or mistake.correction,
+                    corrected_verdict=mistake.pending_corrected_verdict or mistake.corrected_verdict,
+                    flagged_reason="",
+                    pending_correction="",
+                    pending_corrected_verdict="",
+                ),
+                True,
+            )
+        if action == "retire":
+            return replace(mistake, status="retired", flagged_reason=""), True
+        parser.error(f"unknown rules command: {action}")
+        raise AssertionError("unreachable")
+
+    if action == "approve":
+        if mistake.status != "candidate":
+            parser.error(f"only candidate rules can be approved: {rule_id}")
+        return replace(mistake, status="active", flagged_reason=""), True
+    if action == "reject":
+        if mistake.status != "candidate":
+            parser.error(f"only candidate rules can be rejected: {rule_id}")
+        return None, True
+    if action == "retire":
+        return replace(mistake, status="retired", flagged_reason=""), True
+    parser.error(f"unknown rules command: {action}")
+    raise AssertionError("unreachable")
 
 
 RuleEntry = TypeVar("RuleEntry", PreferenceRule, PatternEntry)
@@ -364,13 +457,15 @@ def _update_entry(
     if action == "approve":
         if entry.status != "candidate":
             parser.error(f"only candidate rules can be approved: {rule_id}")
-        return replace(entry, status="active"), True
+        # Approving a flagged candidate is an explicit override of the
+        # conflict it was flagged for; clear the flag once resolved.
+        return replace(entry, status="active", flagged_reason=""), True
     if action == "reject":
         if entry.status != "candidate":
             parser.error(f"only candidate rules can be rejected: {rule_id}")
         return None, True
     if action == "retire":
-        return replace(entry, status="retired"), True
+        return replace(entry, status="retired", flagged_reason=""), True
     parser.error(f"unknown rules command: {action}")
     raise AssertionError("unreachable")
 

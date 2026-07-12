@@ -73,6 +73,36 @@ This philosophy section states the commitment. How confidence is computed,
 and what a confirmation dialogue looks like, are implementation decisions
 for later work, not settled here.
 
+**Implemented.** The two trigger conditions above share one vocabulary
+(`flagged_reason`) but differ in mechanical effect, since they are not
+symmetric risks:
+
+- `contradicts_established_rule`: new feedback conflicts with an already
+  **active** (established, well-evidenced) rule, pattern, or known mistake.
+  This withholds the effect of the new signal — the established rule keeps
+  governing reviews unchanged — and surfaces the conflict via `rules list`
+  and `learn`/`iterate` output. Resolving is a manual, out-of-band CLI
+  action reusing the existing `rules approve`/`rules reject` commands:
+  approve keeps the established rule and discards the new signal; reject
+  accepts the new signal and overwrites the established rule. A conflict
+  against a still-**candidate** entry (not yet established) is ordinary
+  non-promotion, not a confirmation-worthy event — Philosophy's word
+  "established" is read literally as `status == "active"`.
+- `low_confidence_disagreement`: the agent's own confidence was already low
+  when its verdict disagreed with the user's. This is promote-but-annotate,
+  not withheld: the decision record and any promotion proceed exactly as
+  they would without the flag, and `flagged_reason` on the `DecisionRecord`
+  is purely informational.
+
+Neither trigger introduces a blocking prompt anywhere. `learn`/`iterate`
+remain fully non-interactive, scriptable commands; a flagged conflict
+persists in the saved profile until a human runs `rules approve`/`reject`
+later, or indefinitely if they never do — consistent with "must still
+commit to its best judgment... without making the loop dependent on
+constant human availability." The confidence threshold used for the second
+trigger is an uncalibrated placeholder (`LOW_CONFIDENCE_THRESHOLD` in
+`agent.py`), not derived from real usage data yet.
+
 ### The user keeps changing, so the model must keep growing
 
 A user's judgment is not fixed. Taste, priorities, and standards drift over
@@ -495,9 +525,12 @@ Still incomplete:
   only covers rules that caused an issue; a preference rule or positive
   example an artifact satisfied is not yet credited, since `ArtifactReview`
   does not structurally surface satisfied-but-not-issued rules today
-- the Philosophy section's confidence-bearing disagreement (surfacing
-  low-confidence or contradicting feedback for user confirmation) is not
-  implemented; `learn` currently accepts and stores feedback unconditionally
+- the Philosophy section's confidence-bearing disagreement -- **resolved**:
+  see "An opinion, not an echo" for the implemented `flagged_reason`
+  mechanism (`contradicts_established_rule` withholds effect and is
+  resolved via `rules approve`/`reject`; `low_confidence_disagreement` is
+  promote-but-annotate). The confidence threshold used for the low-
+  confidence trigger is an uncalibrated placeholder pending real usage data
 - retrieval-stability guarantees beyond the deliberate recency tie-break in
   `_relevant_records` are out of scope for the MVP; there is a same-input
   determinism test as a regression guard, but no vector index, embedding

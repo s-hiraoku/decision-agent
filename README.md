@@ -71,6 +71,23 @@ advisory-only staleness flag for active rules that have not yet caused a
 review issue, or that are repeatedly contradicted by user feedback -- this
 is never used to auto-retire a rule.
 
+When new feedback conflicts with an established (`active`) rule, pattern, or
+known mistake, the conflicting signal does not silently overwrite it. The
+existing rule keeps governing reviews unchanged, and the conflict shows up
+under a `needs_confirmation` list in `learn`/`iterate` output and in
+`rules list`, with a `flagged_reason` of `contradicts_established_rule`.
+Resolve it the same way as a candidate: `rules approve` keeps the
+established rule and discards the new signal; `rules reject` accepts the
+new signal and overwrites the established rule's correction. This never
+blocks `learn`/`iterate` -- both remain fully non-interactive, and an
+unresolved conflict just persists in the profile until a human runs
+`rules approve`/`reject`, however long that takes.
+
+Separately, when the agent's own confidence was already low and its
+verdict disagreed with the user's feedback, that decision record is
+annotated with `flagged_reason: low_confidence_disagreement` -- informational
+only; recording and promotion proceed exactly as they would otherwise.
+
 Candidate rules can be promoted or removed without editing JSON by hand:
 
 ```bash

@@ -15,6 +15,7 @@ from decision_agent.models import (
     DecisionProfile,
     DecisionRecord,
     EvaluationCase,
+    KnownMistake,
     PatternEntry,
     PreferenceRule,
     ReviewIssue,
@@ -421,6 +422,191 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(mistake.status, "candidate")
         self.assertEqual(mistake.count, 2)
         self.assertEqual(len(mistake.source_record_ids), 1)
+        self.assertEqual(mistake.flagged_reason, "")
+
+    def test_known_mistake_flags_contradiction_against_an_active_rule(self) -> None:
+        active_mistake = KnownMistake(
+            pattern="needs a concrete pain point up front",
+            correction="add a failure story",
+            count=2,
+            status="active",
+            source_record_ids=("r1", "r2"),
+            corrected_verdict="revise",
+        )
+        profile = DecisionProfile(user_id="u1", criteria={}, known_mistakes=(active_mistake,))
+        agent = DecisionAgent(profile)
+
+        request = ArtifactReviewRequest(task_type="blog_outline", intent="write about Decision Agent", artifact="draft")
+        review = ArtifactReview(verdict="accept", confidence=0.5, summary="s")
+        feedback = UserFeedback(verdict="reject", notes="needs a concrete pain point up front")
+        learned = agent.learn(request, review, feedback)
+
+        mistake = learned.known_mistakes[0]
+        self.assertEqual(mistake.status, "active")
+        self.assertEqual(mistake.flagged_reason, "contradicts_established_rule")
+        self.assertEqual(mistake.correction, "add a failure story")
+        self.assertEqual(mistake.corrected_verdict, "revise")
+        self.assertEqual(mistake.pending_correction, "needs a concrete pain point up front")
+        self.assertEqual(mistake.pending_corrected_verdict, "reject")
+
+    def test_positive_example_contradiction_flags_only_against_active_negative(self) -> None:
+        candidate_negative = PatternEntry.from_value(
+            {"text": "abstract concept before concrete pain point", "status": "candidate"},
+            kind="negative_pattern",
+        )
+        profile = DecisionProfile(user_id="u1", criteria={}, negative_patterns=(candidate_negative,))
+        agent = DecisionAgent(profile)
+        request = ArtifactReviewRequest(task_type="blog_outline", intent="write about Decision Agent", artifact="draft")
+        review = ArtifactReview(verdict="accept", confidence=0.9, summary="s")
+        feedback = UserFeedback(
+            verdict="accept", notes="n", positive_examples=("abstract concept before concrete pain point",)
+        )
+        learned = agent.learn(request, review, feedback)
+
+        positive = learned.positive_examples[0]
+        self.assertEqual(positive.status, "candidate")
+        self.assertEqual(positive.flagged_reason, "")
+
+    def test_positive_example_flags_contradiction_against_active_negative(self) -> None:
+        active_negative = PatternEntry.from_value(
+            {"text": "abstract concept before concrete pain point", "status": "active"},
+            kind="negative_pattern",
+        )
+        profile = DecisionProfile(user_id="u1", criteria={}, negative_patterns=(active_negative,))
+        agent = DecisionAgent(profile)
+        request = ArtifactReviewRequest(task_type="blog_outline", intent="write about Decision Agent", artifact="draft")
+        review = ArtifactReview(verdict="accept", confidence=0.9, summary="s")
+        feedback = UserFeedback(
+            verdict="accept", notes="n", positive_examples=("abstract concept before concrete pain point",)
+        )
+        learned = agent.learn(request, review, feedback)
+
+        positive = learned.positive_examples[0]
+        self.assertEqual(positive.status, "candidate")
+        self.assertEqual(positive.flagged_reason, "contradicts_established_rule")
+
+    def test_low_confidence_disagreement_promotes_but_annotates_record(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        agent = DecisionAgent(profile)
+        request = ArtifactReviewRequest(task_type="blog_outline", intent="write about Decision Agent", artifact="draft")
+        low_confidence_review = ArtifactReview(verdict="accept", confidence=0.3, summary="s")
+        feedback = UserFeedback(
+            verdict="revise", notes="n", preference_rules=("start with a concrete failure case",)
+        )
+
+        learned = agent.learn(request, low_confidence_review, feedback)
+
+        self.assertEqual(learned.decision_records[-1].flagged_reason, "low_confidence_disagreement")
+        # promote-but-annotate: recording/promotion proceeds normally, unblocked
+        self.assertEqual(learned.preference_rules[0].text, "start with a concrete failure case")
+
+    def test_confident_disagreement_is_not_flagged_as_low_confidence(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        agent = DecisionAgent(profile)
+        request = ArtifactReviewRequest(task_type="blog_outline", intent="write about Decision Agent", artifact="draft")
+        confident_review = ArtifactReview(verdict="accept", confidence=0.8, summary="s")
+        feedback = UserFeedback(verdict="revise", notes="n")
+
+        learned = agent.learn(request, confident_review, feedback)
+
+        self.assertEqual(learned.decision_records[-1].flagged_reason, "")
+
+    def test_confident_agreement_produces_no_flags(self) -> None:
+        active_rule = PreferenceRule.from_value(
+            {"text": "put a concrete pain point before abstract concept explanation", "status": "active"}
+        )
+        active_negative = PatternEntry.from_value(
+            {"text": "abstract explanation before concrete problem", "status": "active"}, kind="negative_pattern"
+        )
+        profile = DecisionProfile(
+            user_id="u1", criteria={}, preference_rules=(active_rule,), negative_patterns=(active_negative,)
+        )
+        agent = DecisionAgent(profile)
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "This post opens with a concrete failure case about Decision Agent before naming the concept, "
+                "then explains loop engineering and why preference profiles make agents better over iterations."
+            ),
+        )
+        review = agent.review(request)
+        feedback = UserFeedback(verdict=review.verdict, notes="looks good")
+
+        learned = agent.learn(request, review, feedback)
+
+        self.assertEqual(learned.decision_records[-1].flagged_reason, "")
+        self.assertEqual(learned.preference_rules[0].flagged_reason, "")
+        self.assertEqual(learned.negative_patterns[0].flagged_reason, "")
+
+    def test_rules_approve_on_flagged_known_mistake_keeps_established_correction(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            flagged = KnownMistake(
+                pattern="needs a concrete pain point up front",
+                correction="add a failure story",
+                count=3,
+                status="active",
+                source_record_ids=("r1", "r2"),
+                corrected_verdict="revise",
+                flagged_reason="contradicts_established_rule",
+                pending_correction="something else",
+                pending_corrected_verdict="reject",
+            )
+            save_profile(DecisionProfile(user_id="u1", criteria={}, known_mistakes=(flagged,)), profile_path)
+
+            self.assertEqual(cli_main(["rules", "approve", profile_path, flagged.pattern]), 0)
+            with open(profile_path, encoding="utf-8") as file:
+                approved = DecisionProfile.from_dict(json.load(file))
+
+            mistake = approved.known_mistakes[0]
+            self.assertEqual(mistake.flagged_reason, "")
+            self.assertEqual(mistake.correction, "add a failure story")
+            self.assertEqual(mistake.corrected_verdict, "revise")
+            self.assertEqual(mistake.pending_correction, "")
+
+    def test_rules_reject_on_flagged_known_mistake_overwrites_with_new_signal(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile_path = f"{directory}/profile.json"
+            flagged = KnownMistake(
+                pattern="needs a concrete pain point up front",
+                correction="add a failure story",
+                count=3,
+                status="active",
+                source_record_ids=("r1", "r2"),
+                corrected_verdict="revise",
+                flagged_reason="contradicts_established_rule",
+                pending_correction="something else",
+                pending_corrected_verdict="reject",
+            )
+            save_profile(DecisionProfile(user_id="u1", criteria={}, known_mistakes=(flagged,)), profile_path)
+
+            self.assertEqual(cli_main(["rules", "reject", profile_path, flagged.pattern]), 0)
+            with open(profile_path, encoding="utf-8") as file:
+                rejected = DecisionProfile.from_dict(json.load(file))
+
+            mistake = rejected.known_mistakes[0]
+            self.assertEqual(mistake.flagged_reason, "")
+            self.assertEqual(mistake.correction, "something else")
+            self.assertEqual(mistake.corrected_verdict, "reject")
+            self.assertEqual(mistake.pending_correction, "")
+
+    def test_learn_and_iterate_are_non_interactive(self) -> None:
+        """Regression guard: learn/iterate must never depend on interactive input.
+
+        Confidence-bearing disagreement resolves as an out-of-band CLI
+        action (`rules approve`/`reject`), never a blocking prompt -- this
+        guards against any interactive-input primitive creeping into the
+        module, not just a literal `input()` call.
+        """
+        import inspect
+        import re
+
+        from decision_agent import cli as cli_module
+
+        source = inspect.getsource(cli_module)
+        interactive_primitive = re.compile(r"\binput\(|\bsys\.stdin\b|\bgetpass\b|\braw_input\(")
+        self.assertNotRegex(source, interactive_primitive)
 
     def test_review_uses_past_records_for_same_task_type(self) -> None:
         profile = DecisionProfile(user_id="u1", criteria={})

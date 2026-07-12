@@ -101,6 +101,7 @@ class PreferenceRule:
     miss_count: int = 0
     created_at: str = ""
     last_used_at: str = ""
+    flagged_reason: str = ""
 
     @classmethod
     def from_value(cls, value: Any) -> "PreferenceRule":
@@ -127,6 +128,7 @@ class PreferenceRule:
             miss_count=int(value.get("miss_count", 0)),
             created_at=str(_get(value, "created_at", "")),
             last_used_at=str(_get(value, "last_used_at", "")),
+            flagged_reason=str(_get(value, "flagged_reason", "")),
         )
 
     def applies_to(self, task_type: str) -> bool:
@@ -144,6 +146,7 @@ class PreferenceRule:
             "miss_count": self.miss_count,
             "created_at": self.created_at,
             "last_used_at": self.last_used_at,
+            "flagged_reason": self.flagged_reason,
         }
 
     def __eq__(self, other: object) -> bool:
@@ -172,6 +175,7 @@ class PatternEntry:
     miss_count: int = 0
     created_at: str = ""
     last_used_at: str = ""
+    flagged_reason: str = ""
 
     @classmethod
     def from_value(cls, value: Any, *, kind: str) -> "PatternEntry":
@@ -198,6 +202,7 @@ class PatternEntry:
             miss_count=int(value.get("miss_count", 0)),
             created_at=str(_get(value, "created_at", "")),
             last_used_at=str(_get(value, "last_used_at", "")),
+            flagged_reason=str(_get(value, "flagged_reason", "")),
         )
 
     def applies_to(self, task_type: str) -> bool:
@@ -215,6 +220,7 @@ class PatternEntry:
             "miss_count": self.miss_count,
             "created_at": self.created_at,
             "last_used_at": self.last_used_at,
+            "flagged_reason": self.flagged_reason,
         }
 
     def __eq__(self, other: object) -> bool:
@@ -446,6 +452,9 @@ class KnownMistake:
     status: str = "active"
     source_record_ids: tuple[str, ...] = ()
     corrected_verdict: str = ""
+    flagged_reason: str = ""
+    pending_correction: str = ""
+    pending_corrected_verdict: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "KnownMistake":
@@ -459,6 +468,9 @@ class KnownMistake:
             status=status,
             source_record_ids=tuple(str(item) for item in _get_list(data, "source_record_ids")),
             corrected_verdict=str(_get(data, "corrected_verdict", "")),
+            flagged_reason=str(_get(data, "flagged_reason", "")),
+            pending_correction=str(_get(data, "pending_correction", "")),
+            pending_corrected_verdict=str(_get(data, "pending_corrected_verdict", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -469,6 +481,9 @@ class KnownMistake:
             "status": self.status,
             "source_record_ids": list(self.source_record_ids),
             "corrected_verdict": self.corrected_verdict,
+            "flagged_reason": self.flagged_reason,
+            "pending_correction": self.pending_correction,
+            "pending_corrected_verdict": self.pending_corrected_verdict,
         }
 
 
@@ -480,6 +495,7 @@ class DecisionRecord:
     delta: str
     id: str = ""
     created_at: str = ""
+    flagged_reason: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DecisionRecord":
@@ -490,6 +506,7 @@ class DecisionRecord:
             delta=str(_get(data, "delta", "")),
             id=str(_get(data, "id", "")),
             created_at=str(_get(data, "created_at", "")),
+            flagged_reason=str(_get(data, "flagged_reason", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -500,6 +517,7 @@ class DecisionRecord:
             "delta": self.delta,
             "id": self.id,
             "created_at": self.created_at,
+            "flagged_reason": self.flagged_reason,
         }
 
 
