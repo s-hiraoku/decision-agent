@@ -20,6 +20,7 @@ MIN_USEFUL_ARTIFACT_LENGTH = 120
 HISTORY_MATCH_LIMIT = 3
 MIN_NON_ASCII_CHAR_NGRAM_LENGTH = 4
 MIN_CHAR_UNIT_OVERLAP = 3
+SAME_PATTERN_SIMILARITY_THRESHOLD = 0.6
 
 
 class HeuristicReviewEngine:
@@ -152,6 +153,16 @@ def text_matches_signal(text: str, signal_text: str) -> bool:
         return False
     normalized_signal = _normalize(signal_text)
     return candidate in normalized_signal or text_similarity(candidate, normalized_signal) >= 0.25
+
+
+def same_pattern(left: str, right: str) -> bool:
+    """Whether two feedback/mistake patterns are "the same" for recurrence purposes.
+
+    Uses the same token-containment / character n-gram similarity as review
+    matching, so a pattern reworded differently still counts as a recurrence
+    instead of requiring exact string equality.
+    """
+    return text_similarity(left, right) >= SAME_PATTERN_SIMILARITY_THRESHOLD
 
 
 def text_similarity(left: str, right: str) -> float:

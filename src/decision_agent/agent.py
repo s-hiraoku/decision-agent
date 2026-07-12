@@ -9,7 +9,7 @@ import re
 import uuid
 
 from decision_agent.engines import AgreementJudge, ReviewEngine
-from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
+from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine, same_pattern
 from decision_agent.models import (
     Alternative,
     ArtifactReview,
@@ -116,29 +116,46 @@ class DecisionAgent:
         user_feedback: UserFeedback,
     ) -> DecisionProfile:
         delta = _feedback_delta(agent_review, user_feedback)
+        record_id = _record_id(request)
         record = DecisionRecord(
             request=request,
             agent_review=agent_review,
             user_feedback=user_feedback,
             delta=delta,
-            id=_record_id(request),
+            id=record_id,
             created_at=datetime.now(UTC).isoformat(),
+        )
+
+        negative_patterns = _append_pattern_entries(
+            self.profile.negative_patterns,
+            user_feedback.negative_patterns,
+            kind="negative_pattern",
+            record_id=record_id,
+            opposite_polarity=self.profile.positive_examples,
+        )
+        positive_examples = _append_pattern_entries(
+            self.profile.positive_examples,
+            user_feedback.positive_examples,
+            kind="positive_example",
+            record_id=record_id,
+            opposite_polarity=self.profile.negative_patterns,
         )
 
         return replace(
             self.profile,
-            preference_rules=_append_preference_rules(self.profile.preference_rules, user_feedback.preference_rules),
-            negative_patterns=_append_pattern_entries(
-                self.profile.negative_patterns,
-                user_feedback.negative_patterns,
-                kind="negative_pattern",
+            preference_rules=_append_preference_rules(
+                self.profile.preference_rules,
+                user_feedback.preference_rules,
+                record_id=record_id,
             ),
-            positive_examples=_append_pattern_entries(
-                self.profile.positive_examples,
-                user_feedback.positive_examples,
-                kind="positive_example",
+            negative_patterns=negative_patterns,
+            positive_examples=positive_examples,
+            known_mistakes=_update_known_mistakes(
+                self.profile.known_mistakes,
+                agent_review,
+                user_feedback,
+                record_id=record_id,
             ),
-            known_mistakes=_update_known_mistakes(self.profile.known_mistakes, agent_review, user_feedback),
             decision_records=(*self.profile.decision_records, record),
         )
 
@@ -327,28 +344,66 @@ def _record_id(request: ArtifactReviewRequest) -> str:
     return f"{timestamp}-{request.task_type}-{intent}-{uuid.uuid4().hex[:8]}"
 
 
+RECURRENCE_THRESHOLD = 2
+
+
 def _update_known_mistakes(
     current: tuple[KnownMistake, ...],
     agent_review: ArtifactReview,
     user_feedback: UserFeedback,
+    *,
+    record_id: str,
 ) -> tuple[KnownMistake, ...]:
     if agent_review.verdict == user_feedback.verdict:
         return current
 
     pattern = user_feedback.notes.strip() or f"agent predicted {agent_review.verdict} when user judged {user_feedback.verdict}"
     correction = _mistake_correction(user_feedback)
+    corrected_verdict = user_feedback.verdict
     values: list[KnownMistake] = []
-    updated = False
+    matched = False
 
     for mistake in current:
-        if mistake.pattern == pattern:
-            values.append(replace(mistake, count=mistake.count + 1, correction=correction or mistake.correction))
-            updated = True
-        else:
+        if not same_pattern(mistake.pattern, pattern):
             values.append(mistake)
+            continue
 
-    if not updated:
-        values.append(KnownMistake(pattern=pattern, correction=correction, count=1))
+        matched = True
+        if mistake.status == "active" or record_id in mistake.source_record_ids:
+            values.append(replace(mistake, count=mistake.count + 1, correction=correction or mistake.correction))
+            continue
+
+        contradicted = bool(mistake.corrected_verdict) and mistake.corrected_verdict != corrected_verdict
+        if contradicted:
+            # A same_pattern mistake recurred but the user corrected it toward a
+            # different verdict this time -- do not let it promote silently.
+            values.append(replace(mistake, count=mistake.count + 1))
+            continue
+
+        source_record_ids = (*mistake.source_record_ids, record_id)
+        status = "active" if len(set(source_record_ids)) >= RECURRENCE_THRESHOLD else "candidate"
+        values.append(
+            replace(
+                mistake,
+                count=mistake.count + 1,
+                correction=correction or mistake.correction,
+                status=status,
+                source_record_ids=source_record_ids,
+                corrected_verdict=corrected_verdict,
+            )
+        )
+
+    if not matched:
+        values.append(
+            KnownMistake(
+                pattern=pattern,
+                correction=correction,
+                count=1,
+                status="candidate",
+                source_record_ids=(record_id,),
+                corrected_verdict=corrected_verdict,
+            )
+        )
 
     return tuple(values)
 
@@ -376,14 +431,29 @@ def _append_unique(current: tuple[str, ...], additions: tuple[str, ...]) -> tupl
 def _append_preference_rules(
     current: tuple[PreferenceRule, ...],
     additions: tuple[str, ...],
+    *,
+    record_id: str,
 ) -> tuple[PreferenceRule, ...]:
     values = list(current)
-    seen = {item.id for item in current}
     for item in additions:
-        entry = PreferenceRule.from_value({"text": item, "source": "feedback"})
-        if entry.text and entry.id not in seen:
-            values.append(entry)
-            seen.add(entry.id)
+        if not item:
+            continue
+        match_index = _find_same_pattern_index(values, item)
+        if match_index is None:
+            values.append(
+                PreferenceRule.from_value(
+                    {"text": item, "source": "feedback", "status": "candidate", "source_record_ids": [record_id]}
+                )
+            )
+            continue
+
+        existing = values[match_index]
+        if record_id in existing.source_record_ids:
+            continue
+        source_record_ids = (*existing.source_record_ids, record_id)
+        status = existing.status if existing.status == "active" else _promoted_status(source_record_ids)
+        values[match_index] = replace(existing, source_record_ids=source_record_ids, status=status)
+
     return tuple(values)
 
 
@@ -392,12 +462,51 @@ def _append_pattern_entries(
     additions: tuple[str, ...],
     *,
     kind: str,
+    record_id: str,
+    opposite_polarity: tuple[PatternEntry, ...] = (),
 ) -> tuple[PatternEntry, ...]:
     values = list(current)
-    seen = {item.id for item in current}
     for item in additions:
-        entry = PatternEntry.from_value({"text": item, "source": "feedback"}, kind=kind)
-        if entry.text and entry.id not in seen:
-            values.append(entry)
-            seen.add(entry.id)
+        if not item:
+            continue
+        if any(same_pattern(item, other.text) for other in opposite_polarity):
+            # Recurs against an opposite-polarity entry (e.g. now praising what was
+            # previously flagged as a negative pattern) -- a real, cheap contradiction
+            # signal, so this stays a fresh, unpromoted candidate rather than merging.
+            values.append(
+                PatternEntry.from_value(
+                    {"text": item, "source": "feedback", "status": "candidate", "source_record_ids": [record_id]},
+                    kind=kind,
+                )
+            )
+            continue
+
+        match_index = _find_same_pattern_index(values, item)
+        if match_index is None:
+            values.append(
+                PatternEntry.from_value(
+                    {"text": item, "source": "feedback", "status": "candidate", "source_record_ids": [record_id]},
+                    kind=kind,
+                )
+            )
+            continue
+
+        existing = values[match_index]
+        if record_id in existing.source_record_ids:
+            continue
+        source_record_ids = (*existing.source_record_ids, record_id)
+        status = existing.status if existing.status == "active" else _promoted_status(source_record_ids)
+        values[match_index] = replace(existing, source_record_ids=source_record_ids, status=status)
+
     return tuple(values)
+
+
+def _find_same_pattern_index(entries: list[PreferenceRule] | list[PatternEntry], text: str) -> int | None:
+    for index, entry in enumerate(entries):
+        if same_pattern(entry.text, text):
+            return index
+    return None
+
+
+def _promoted_status(source_record_ids: tuple[str, ...]) -> str:
+    return "active" if len(set(source_record_ids)) >= RECURRENCE_THRESHOLD else "candidate"

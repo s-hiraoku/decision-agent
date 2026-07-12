@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.cli import main as cli_main
+from decision_agent.engines.heuristic import same_pattern
 from decision_agent.models import (
     Alternative,
     ArtifactReviewRequest,
@@ -379,6 +380,17 @@ class DecisionAgentTest(unittest.TestCase):
         )
 
         self.assertTrue(any("important similar artifact feedback" in issue.reason for issue in review.issues))
+
+    def test_same_pattern_matches_reworded_text(self) -> None:
+        self.assertTrue(
+            same_pattern(
+                "abstract concept before concrete pain point",
+                "starts with abstract concept, concrete pain point comes too late",
+            )
+        )
+
+    def test_same_pattern_rejects_unrelated_text(self) -> None:
+        self.assertFalse(same_pattern("abstract concept before concrete pain point", "packaging and release notes"))
 
     def test_review_is_deterministic_for_the_same_input(self) -> None:
         profile = DecisionProfile(

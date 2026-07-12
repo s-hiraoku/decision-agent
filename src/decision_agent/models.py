@@ -96,7 +96,7 @@ class PreferenceRule:
     task_types: tuple[str, ...] = ()
     status: str = "active"
     source: str = "user"
-    source_record_id: str = ""
+    source_record_ids: tuple[str, ...] = ()
     hit_count: int = 0
     miss_count: int = 0
     created_at: str = ""
@@ -121,7 +121,7 @@ class PreferenceRule:
             task_types=tuple(str(item) for item in _get_list(value, "task_types")),
             status=status,
             source=str(_get(value, "source", "user")),
-            source_record_id=str(_get(value, "source_record_id", "")),
+            source_record_ids=_legacy_source_record_ids(value),
             hit_count=int(value.get("hit_count", 0)),
             miss_count=int(value.get("miss_count", 0)),
             created_at=str(_get(value, "created_at", "")),
@@ -137,7 +137,7 @@ class PreferenceRule:
             "task_types": list(self.task_types),
             "status": self.status,
             "source": self.source,
-            "source_record_id": self.source_record_id,
+            "source_record_ids": list(self.source_record_ids),
             "hit_count": self.hit_count,
             "miss_count": self.miss_count,
             "created_at": self.created_at,
@@ -164,7 +164,7 @@ class PatternEntry:
     task_types: tuple[str, ...] = ()
     status: str = "active"
     source: str = "user"
-    source_record_id: str = ""
+    source_record_ids: tuple[str, ...] = ()
     hit_count: int = 0
     miss_count: int = 0
     created_at: str = ""
@@ -189,7 +189,7 @@ class PatternEntry:
             task_types=tuple(str(item) for item in _get_list(value, "task_types")),
             status=status,
             source=str(_get(value, "source", "user")),
-            source_record_id=str(_get(value, "source_record_id", "")),
+            source_record_ids=_legacy_source_record_ids(value),
             hit_count=int(value.get("hit_count", 0)),
             miss_count=int(value.get("miss_count", 0)),
             created_at=str(_get(value, "created_at", "")),
@@ -205,7 +205,7 @@ class PatternEntry:
             "task_types": list(self.task_types),
             "status": self.status,
             "source": self.source,
-            "source_record_id": self.source_record_id,
+            "source_record_ids": list(self.source_record_ids),
             "hit_count": self.hit_count,
             "miss_count": self.miss_count,
             "created_at": self.created_at,
@@ -437,13 +437,22 @@ class KnownMistake:
     pattern: str
     correction: str
     count: int = 1
+    status: str = "active"
+    source_record_ids: tuple[str, ...] = ()
+    corrected_verdict: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "KnownMistake":
+        status = str(_get(data, "status", "active"))
+        if status not in SUPPORTED_RULE_STATUSES:
+            raise ValueError(f"unsupported rule status: {status}")
         return cls(
             pattern=str(_get(data, "pattern", "")),
             correction=str(_get(data, "correction", "")),
             count=int(data.get("count", 1)),
+            status=status,
+            source_record_ids=tuple(str(item) for item in _get_list(data, "source_record_ids")),
+            corrected_verdict=str(_get(data, "corrected_verdict", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -451,6 +460,9 @@ class KnownMistake:
             "pattern": self.pattern,
             "correction": self.correction,
             "count": self.count,
+            "status": self.status,
+            "source_record_ids": list(self.source_record_ids),
+            "corrected_verdict": self.corrected_verdict,
         }
 
 
@@ -567,3 +579,11 @@ def _string_tuple(value: Any, *, field_name: str) -> tuple[str, ...]:
 def _stable_entry_id(kind: str, text: str) -> str:
     digest = sha256(f"{kind}:{text}".encode("utf-8")).hexdigest()[:12]
     return f"rule-{digest}"
+
+
+def _legacy_source_record_ids(value: dict[str, Any]) -> tuple[str, ...]:
+    ids = tuple(str(item) for item in _get_list(value, "source_record_ids"))
+    if ids:
+        return ids
+    legacy_single = str(_get(value, "source_record_id", ""))
+    return (legacy_single,) if legacy_single else ()
