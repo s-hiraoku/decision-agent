@@ -381,6 +381,52 @@ class DecisionAgentTest(unittest.TestCase):
 
         self.assertTrue(any("important similar artifact feedback" in issue.reason for issue in review.issues))
 
+    def test_learn_increments_hit_count_when_flagged_rule_is_vindicated(self) -> None:
+        rule = PreferenceRule.from_value(
+            {"text": "put a concrete pain point before abstract concept explanation", "status": "active"}
+        )
+        profile = DecisionProfile(user_id="u1", criteria={}, preference_rules=(rule,))
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "This post defines the concept first. It then explains loop engineering and describes "
+                "why preference profiles can make agents better over repeated iterations."
+            ),
+        )
+        agent = DecisionAgent(profile)
+        review = agent.review(request)
+        self.assertTrue(any(issue.violated_rule_id == rule.id for issue in review.issues))
+
+        learned = agent.learn(request, review, UserFeedback(verdict="revise", notes="needs work"))
+
+        updated_rule = next(item for item in learned.preference_rules if item.id == rule.id)
+        self.assertEqual(updated_rule.hit_count, 1)
+        self.assertEqual(updated_rule.miss_count, 0)
+        self.assertTrue(updated_rule.last_used_at)
+
+    def test_learn_increments_miss_count_when_flagged_rule_is_a_false_positive(self) -> None:
+        rule = PreferenceRule.from_value(
+            {"text": "put a concrete pain point before abstract concept explanation", "status": "active"}
+        )
+        profile = DecisionProfile(user_id="u1", criteria={}, preference_rules=(rule,))
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact=(
+                "This post defines the concept first. It then explains loop engineering and describes "
+                "why preference profiles can make agents better over repeated iterations."
+            ),
+        )
+        agent = DecisionAgent(profile)
+        review = agent.review(request)
+
+        learned = agent.learn(request, review, UserFeedback(verdict="accept", notes="actually fine"))
+
+        updated_rule = next(item for item in learned.preference_rules if item.id == rule.id)
+        self.assertEqual(updated_rule.hit_count, 0)
+        self.assertEqual(updated_rule.miss_count, 1)
+
     def test_same_pattern_matches_reworded_text(self) -> None:
         self.assertTrue(
             same_pattern(

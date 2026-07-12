@@ -482,11 +482,19 @@ Still incomplete:
   records, without contradiction, before a rule is trusted) is not yet
   implemented: today a single verdict mismatch immediately creates a
   `KnownMistake`, and new preference rules/patterns default to `active`
-  status rather than `candidate`. Status transitions are currently manual
-  only (`rules approve`/`reject`/`retire`), with no automated
-  recurrence, confidence, contradiction, or staleness gating yet
+  status rather than `candidate` -- **resolved**: new entries now start as
+  `candidate` and promote to `active` only once the same fuzzy-matched
+  pattern recurs across at least 2 distinct source records without
+  contradiction; status transitions beyond that remain manual
+  (`rules approve`/`reject`/`retire`)
 - `hit_count`/`miss_count` fields exist on rules but are not yet
-  incremented or read by any review or learning logic
+  incremented or read by any review or learning logic -- **resolved**:
+  `learn` now increments hit/miss and `last_used_at` for rules the engine
+  cited as `violated_rule_id` in that review, based on whether the user's
+  verdict agreed (hit) or accepted anyway (miss, a false positive). This
+  only covers rules that caused an issue; a preference rule or positive
+  example an artifact satisfied is not yet credited, since `ArtifactReview`
+  does not structurally surface satisfied-but-not-issued rules today
 - the Philosophy section's confidence-bearing disagreement (surfacing
   low-confidence or contradicting feedback for user confirmation) is not
   implemented; `learn` currently accepts and stores feedback unconditionally
@@ -494,6 +502,10 @@ Still incomplete:
   `_relevant_records` are out of scope for the MVP; there is a same-input
   determinism test as a regression guard, but no vector index, embedding
   cache, or accumulation-scale-aware thresholding
+- staleness flagging (long-unused or repeatedly-contradicted rules) is
+  advisory-only and computed at CLI display time from existing counters
+  and the existing recurrence threshold; it does not introduce a new
+  numeric constant and never auto-retires a rule
 
 ## Success Criteria
 

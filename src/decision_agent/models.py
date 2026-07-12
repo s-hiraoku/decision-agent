@@ -100,6 +100,7 @@ class PreferenceRule:
     hit_count: int = 0
     miss_count: int = 0
     created_at: str = ""
+    last_used_at: str = ""
 
     @classmethod
     def from_value(cls, value: Any) -> "PreferenceRule":
@@ -125,6 +126,7 @@ class PreferenceRule:
             hit_count=int(value.get("hit_count", 0)),
             miss_count=int(value.get("miss_count", 0)),
             created_at=str(_get(value, "created_at", "")),
+            last_used_at=str(_get(value, "last_used_at", "")),
         )
 
     def applies_to(self, task_type: str) -> bool:
@@ -141,6 +143,7 @@ class PreferenceRule:
             "hit_count": self.hit_count,
             "miss_count": self.miss_count,
             "created_at": self.created_at,
+            "last_used_at": self.last_used_at,
         }
 
     def __eq__(self, other: object) -> bool:
@@ -168,6 +171,7 @@ class PatternEntry:
     hit_count: int = 0
     miss_count: int = 0
     created_at: str = ""
+    last_used_at: str = ""
 
     @classmethod
     def from_value(cls, value: Any, *, kind: str) -> "PatternEntry":
@@ -193,6 +197,7 @@ class PatternEntry:
             hit_count=int(value.get("hit_count", 0)),
             miss_count=int(value.get("miss_count", 0)),
             created_at=str(_get(value, "created_at", "")),
+            last_used_at=str(_get(value, "last_used_at", "")),
         )
 
     def applies_to(self, task_type: str) -> bool:
@@ -209,6 +214,7 @@ class PatternEntry:
             "hit_count": self.hit_count,
             "miss_count": self.miss_count,
             "created_at": self.created_at,
+            "last_used_at": self.last_used_at,
         }
 
     def __eq__(self, other: object) -> bool:

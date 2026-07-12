@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import math
 import re
+from typing import TypeVar
 import uuid
 
 from decision_agent.engines import AgreementJudge, ReviewEngine
@@ -140,14 +141,18 @@ class DecisionAgent:
             record_id=record_id,
             opposite_polarity=self.profile.negative_patterns,
         )
+        preference_rules = _append_preference_rules(
+            self.profile.preference_rules,
+            user_feedback.preference_rules,
+            record_id=record_id,
+        )
+
+        preference_rules = _apply_rule_usage(preference_rules, agent_review, user_feedback, record.created_at)
+        negative_patterns = _apply_rule_usage(negative_patterns, agent_review, user_feedback, record.created_at)
 
         return replace(
             self.profile,
-            preference_rules=_append_preference_rules(
-                self.profile.preference_rules,
-                user_feedback.preference_rules,
-                record_id=record_id,
-            ),
+            preference_rules=preference_rules,
             negative_patterns=negative_patterns,
             positive_examples=positive_examples,
             known_mistakes=_update_known_mistakes(
@@ -405,6 +410,46 @@ def _update_known_mistakes(
             )
         )
 
+    return tuple(values)
+
+
+RuleEntry = TypeVar("RuleEntry", PreferenceRule, PatternEntry)
+
+
+def _apply_rule_usage(
+    entries: tuple[RuleEntry, ...],
+    agent_review: ArtifactReview,
+    user_feedback: UserFeedback,
+    used_at: str,
+) -> tuple[RuleEntry, ...]:
+    """Wire hit/miss/last_used_at for rules the agent cited as a reason in this review.
+
+    A rule referenced via `violated_rule_id` carried a directional claim: "this is
+    a reason not to accept." If the user's actual verdict also was not accept, the
+    claim was vindicated (hit); if the user accepted anyway, it was a false
+    positive (miss). This only covers rules the engine surfaced structurally in
+    `agent_review.issues` -- rules an artifact satisfied are not credited here,
+    since ArtifactReview does not structurally surface satisfied-but-not-issued
+    rules today (see Still Incomplete).
+    """
+    referenced_ids = {issue.violated_rule_id for issue in agent_review.issues if issue.violated_rule_id}
+    if not referenced_ids:
+        return entries
+
+    vindicated = user_feedback.verdict != "accept"
+    values: list[RuleEntry] = []
+    for entry in entries:
+        if entry.id not in referenced_ids:
+            values.append(entry)
+            continue
+        values.append(
+            replace(
+                entry,
+                hit_count=entry.hit_count + (1 if vindicated else 0),
+                miss_count=entry.miss_count + (0 if vindicated else 1),
+                last_used_at=used_at,
+            )
+        )
     return tuple(values)
 
 
