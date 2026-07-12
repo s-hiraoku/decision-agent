@@ -298,6 +298,130 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(learned.known_mistakes[0].pattern, "Problem framing is too weak.")
         self.assertIn("concrete failure", learned.known_mistakes[0].correction)
 
+    def test_preference_rule_promotes_after_recurring_across_distinct_records(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        agent = DecisionAgent(profile)
+
+        request1 = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent, draft one.",
+        )
+        review1 = agent.review(request1)
+        feedback1 = UserFeedback(
+            verdict="revise",
+            notes="Start with user pain.",
+            preference_rules=("start with a concrete failure case",),
+        )
+        learned1 = agent.learn(request1, review1, feedback1)
+
+        rule_after_first = learned1.preference_rules[0]
+        self.assertEqual(rule_after_first.status, "candidate")
+        self.assertFalse(rule_after_first.applies_to("blog_outline"))
+
+        agent2 = DecisionAgent(learned1)
+        request2 = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent, a completely different draft two.",
+        )
+        review2 = agent2.review(request2)
+        feedback2 = UserFeedback(
+            verdict="revise",
+            notes="Start with the user's pain.",
+            preference_rules=("start with a concrete failure case example",),
+        )
+        learned2 = agent2.learn(request2, review2, feedback2)
+
+        rule_after_second = learned2.preference_rules[0]
+        self.assertEqual(rule_after_second.status, "active")
+        self.assertEqual(len(set(rule_after_second.source_record_ids)), 2)
+        self.assertTrue(rule_after_second.applies_to("blog_outline"))
+
+    def test_positive_example_recurring_against_negative_pattern_does_not_promote(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        agent = DecisionAgent(profile)
+
+        request1 = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent, draft one.",
+        )
+        review1 = agent.review(request1)
+        feedback1 = UserFeedback(
+            verdict="revise",
+            notes="n",
+            negative_patterns=("abstract concept before concrete pain point",),
+        )
+        learned1 = agent.learn(request1, review1, feedback1)
+        self.assertEqual(learned1.negative_patterns[0].status, "candidate")
+
+        agent2 = DecisionAgent(learned1)
+        request2 = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A completely different draft two.",
+        )
+        review2 = agent2.review(request2)
+        feedback2 = UserFeedback(
+            verdict="accept",
+            notes="n",
+            positive_examples=("abstract concept before concrete pain point",),
+        )
+        learned2 = agent2.learn(request2, review2, feedback2)
+
+        self.assertEqual(learned2.positive_examples[0].status, "candidate")
+        self.assertEqual(len(learned2.positive_examples[0].source_record_ids), 1)
+        self.assertEqual(learned2.negative_patterns[0].status, "candidate")
+
+    def test_known_mistake_promotes_after_recurring_without_contradiction(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        agent = DecisionAgent(profile)
+
+        request1 = ArtifactReviewRequest(
+            task_type="blog_outline", intent="write about Decision Agent", artifact="draft one"
+        )
+        review1 = ArtifactReview(verdict="accept", confidence=0.5, summary="s")
+        feedback1 = UserFeedback(verdict="revise", notes="needs a concrete pain point up front")
+        learned1 = agent.learn(request1, review1, feedback1)
+        self.assertEqual(learned1.known_mistakes[0].status, "candidate")
+
+        agent2 = DecisionAgent(learned1)
+        request2 = ArtifactReviewRequest(
+            task_type="blog_outline", intent="write about Decision Agent", artifact="draft two"
+        )
+        review2 = ArtifactReview(verdict="accept", confidence=0.5, summary="s")
+        feedback2 = UserFeedback(verdict="revise", notes="needs a concrete pain point up front")
+        learned2 = agent2.learn(request2, review2, feedback2)
+
+        mistake = learned2.known_mistakes[0]
+        self.assertEqual(mistake.status, "active")
+        self.assertEqual(len(set(mistake.source_record_ids)), 2)
+
+    def test_known_mistake_blocked_from_promotion_when_correction_contradicts(self) -> None:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        agent = DecisionAgent(profile)
+
+        request1 = ArtifactReviewRequest(
+            task_type="blog_outline", intent="write about Decision Agent", artifact="draft one"
+        )
+        review1 = ArtifactReview(verdict="accept", confidence=0.5, summary="s")
+        feedback1 = UserFeedback(verdict="revise", notes="needs a concrete pain point up front")
+        learned1 = agent.learn(request1, review1, feedback1)
+
+        agent2 = DecisionAgent(learned1)
+        request2 = ArtifactReviewRequest(
+            task_type="blog_outline", intent="write about Decision Agent", artifact="draft two"
+        )
+        review2 = ArtifactReview(verdict="accept", confidence=0.5, summary="s")
+        feedback2 = UserFeedback(verdict="reject", notes="needs a concrete pain point up front")
+        learned2 = agent2.learn(request2, review2, feedback2)
+
+        mistake = learned2.known_mistakes[0]
+        self.assertEqual(mistake.status, "candidate")
+        self.assertEqual(mistake.count, 2)
+        self.assertEqual(len(mistake.source_record_ids), 1)
+
     def test_review_uses_past_records_for_same_task_type(self) -> None:
         profile = DecisionProfile(user_id="u1", criteria={})
         request = ArtifactReviewRequest(
