@@ -34,7 +34,7 @@ class HeuristicReviewEngine:
     ) -> ArtifactReview:
         text = _review_text(request)
         issues: list[ReviewIssue] = []
-        relevant_records = _relevant_records(request, records)
+        relevant_records = relevant_records_for(request, records)
 
         if len(request.artifact.strip()) < MIN_USEFUL_ARTIFACT_LENGTH:
             issues.append(
@@ -270,11 +270,15 @@ def _revision_instruction(verdict: str, issues: list[ReviewIssue]) -> str:
     return " ".join(f"{suggestion}." for suggestion in suggestions[:3])
 
 
-def _relevant_records(
+def relevant_records_for(
     request: ArtifactReviewRequest,
     records: tuple[DecisionRecord, ...],
 ) -> list[DecisionRecord]:
     """Rank same-task-type records by similarity to the incoming request.
+
+    Shared across engines: both HeuristicReviewEngine and LLMReviewEngine use
+    this same deterministic history selection, so which past records get
+    surfaced to a review does not depend on which engine is judging.
 
     `created_at` is a deliberate tie-break, not an accidental side effect of
     sort key order: when two past records are equally similar, the more

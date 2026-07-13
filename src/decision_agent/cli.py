@@ -9,7 +9,9 @@ import sys
 from typing import TypeVar
 
 from decision_agent.agent import FLAG_CONTRADICTS_ESTABLISHED_RULE, RECURRENCE_THRESHOLD, DecisionAgent
+from decision_agent.engines import ReviewEngine
 from decision_agent.engines.heuristic import HeuristicAgreementJudge, HeuristicReviewEngine
+from decision_agent.engines.llm import LLMEngineError, LLMReviewEngine
 from decision_agent.models import DecisionProfile, DecisionRecord, KnownMistake, PatternEntry, PreferenceRule
 from decision_agent.storage import (
     append_decision_record,
@@ -25,10 +27,18 @@ from decision_agent.storage import (
 )
 
 
-SUPPORTED_ENGINES = {"heuristic"}
+SUPPORTED_ENGINES = {"heuristic", "llm"}
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except LLMEngineError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="decision-agent")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -114,6 +124,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "learn":
+        # learn() only records a pre-computed review + feedback; it never
+        # calls a ReviewEngine. --engine/--model are validated here (so a
+        # typo'd flag still errors) but intentionally not passed to _agent(),
+        # which would construct an engine (and, for --engine llm, spawn a
+        # claude subprocess) that this command never uses.
         _engine_name(args, parser)
         profile = load_profile(args.profile)
         request = load_review_request(args.request)
@@ -219,10 +234,14 @@ def _add_engine_arguments(command_parser: argparse.ArgumentParser) -> None:
 
 
 def _agent(profile: DecisionProfile, args: argparse.Namespace, parser: argparse.ArgumentParser) -> DecisionAgent:
-    _engine_name(args, parser)
+    engine = _engine_name(args, parser)
+    if engine == "llm":
+        review_engine: ReviewEngine = LLMReviewEngine(model=args.model)
+    else:
+        review_engine = HeuristicReviewEngine()
     return DecisionAgent(
         profile,
-        review_engine=HeuristicReviewEngine(),
+        review_engine=review_engine,
         agreement_judge=HeuristicAgreementJudge(),
     )
 
@@ -230,7 +249,7 @@ def _agent(profile: DecisionProfile, args: argparse.Namespace, parser: argparse.
 def _engine_name(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
     engine = args.engine or os.environ.get("DECISION_AGENT_ENGINE", "heuristic")
     if engine not in SUPPORTED_ENGINES:
-        parser.error("only the heuristic engine is implemented; llm support is planned in docs/detailed-design.md")
+        parser.error(f"unsupported engine: {engine!r} (supported: {', '.join(sorted(SUPPORTED_ENGINES))})")
     if args.model and engine == "heuristic":
         parser.error("--model is only valid with --engine llm")
     return engine

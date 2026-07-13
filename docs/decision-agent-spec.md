@@ -503,8 +503,19 @@ Implemented first steps:
 Still incomplete:
 
 - orchestration around generator agents before the review step
-- LLM-backed review over richer natural-language criteria; `--engine llm` is
-  specified but not implemented yet
+- LLM-backed review over richer natural-language criteria -- **resolved**:
+  `--engine llm` shells out to the local `claude` CLI (Claude Code) with
+  `--json-schema`, converting its `structured_output` into the domain
+  `ArtifactReview`. This is a deliberate departure from
+  `docs/detailed-design.md`'s §5 design (which sketched a direct
+  `anthropic` Python SDK integration with prompt caching): the CLI-subprocess
+  approach was chosen instead so the engine transparently uses whatever
+  local Claude Code auth is already configured (subscription or API key)
+  with zero new pip dependencies. `docs/detailed-design.md`'s §5 SDK-based
+  design was not built and should be read as superseded by this approach,
+  not as the current plan. Multi-vendor support (other CLIs such as Codex
+  or Copilot) is an explicit non-goal for now, pending confirmation that
+  those CLIs offer an equivalent schema-forcing structured-output flag
 - stronger extraction of durable preference rules from free-form feedback
 - stronger semantic matching for evaluation beyond heuristic text similarity
 - deeper optimization for user-aligned judgment, not only numeric scoring

@@ -345,6 +345,15 @@ class DecisionProfile:
 
 ## 5. LLMReviewEngine の設計
 
+**この節は実装されていない。実際の `LLMReviewEngine` は、本節が前提とする
+`anthropic` Python SDK 直接呼び出しではなく、ローカルの `claude` CLI
+(Claude Code) を `--json-schema` 付きサブプロセスとして呼び出す方式で実装された
+(`src/decision_agent/engines/llm.py`)。これは、ユーザーのローカル Claude Code
+認証(サブスクリプションまたは API キー)をそのまま透過的に使い、新規 pip 依存を
+増やさないための意図的な選択である。以降の §5.1〜§5.5 は当初案の記録として残すが、
+現状のコードとは一致しない。詳細は `decision-agent-spec.md` の
+"Still incomplete"(LLM-backed review, resolved の注記)を参照。**
+
 ### 5.1 モデルとパラメータ
 
 - モデル: `claude-opus-4-8`(固定既定。`--model` で上書き可)

@@ -45,9 +45,31 @@ PYTHONPATH=src python -m decision_agent.cli review \
   --engine heuristic
 ```
 
-The `llm` engine is defined in the detailed design but is not implemented yet;
-passing `--engine llm` fails fast instead of silently falling back to heuristic
-behavior.
+The `llm` engine uses the local `claude` CLI (Claude Code) as a subprocess --
+not the `anthropic` Python package. This means it transparently uses whatever
+local Claude Code authentication is already configured (a Pro/Max
+subscription login or an API key), and requires no new pip dependency:
+
+```bash
+PYTHONPATH=src python -m decision_agent.cli review \
+  examples/review-profile.json \
+  examples/review-request.json \
+  --engine llm \
+  --model claude-opus-4-8
+```
+
+`--engine llm` requires Claude Code (`claude`) installed and authenticated
+locally; Decision Agent does not manage credentials itself. `--model` is
+passed straight through to the `claude` CLI's `--model` flag. `DECISION_AGENT_ENGINE`
+sets the default engine as an environment variable (the `--engine` flag takes
+precedence). If the LLM review fails for any reason (missing binary,
+auth error, malformed response), the command exits with an error rather than
+silently falling back to the heuristic engine -- a caller that asked for
+`--engine llm` asked for that engine's judgment specifically.
+
+Support for other vendors' CLIs (Codex, Copilot, etc.) is a deliberate
+non-goal for now, pending confirmation that they offer an equivalent
+schema-forcing structured-output flag.
 
 List profile rules and patterns:
 

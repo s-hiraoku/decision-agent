@@ -1,12 +1,15 @@
 import json
+import subprocess
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.cli import main as cli_main
 from decision_agent.engines.heuristic import same_pattern
+from decision_agent.engines.llm import REVIEW_JSON_SCHEMA, LLMEngineError, LLMReviewEngine
 from decision_agent.models import (
     Alternative,
     ArtifactReviewRequest,
@@ -975,7 +978,7 @@ class DecisionAgentTest(unittest.TestCase):
 
         self.assertEqual(feedback.core_issues, ("problem framing is weak",))
 
-    def test_cli_accepts_heuristic_engine_and_rejects_llm_for_now(self) -> None:
+    def test_cli_accepts_heuristic_engine_and_rejects_unknown_engine(self) -> None:
         with TemporaryDirectory() as directory:
             profile_path = f"{directory}/profile.json"
             request_path = f"{directory}/request.json"
@@ -1000,9 +1003,9 @@ class DecisionAgentTest(unittest.TestCase):
 
             stderr = StringIO()
             with self.assertRaises(SystemExit), redirect_stderr(stderr):
-                cli_main(["review", profile_path, request_path, "--engine", "llm"])
+                cli_main(["review", profile_path, request_path, "--engine", "nonexistent-engine"])
 
-            self.assertIn("only the heuristic engine is implemented", stderr.getvalue())
+            self.assertIn("invalid choice", stderr.getvalue())
 
     def test_learn_cli_reports_candidate_status_and_activation_countdown(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1141,6 +1144,189 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].id, "legacy-record")
         self.assertEqual(migrated_profile.decision_records, ())
+
+
+def _fake_completed_process(stdout: str, returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=["claude"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+class LLMReviewEngineTest(unittest.TestCase):
+    def _profile_and_request(self) -> tuple[DecisionProfile, ArtifactReviewRequest]:
+        profile = DecisionProfile(user_id="u1", criteria={})
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="A short outline about Decision Agent.",
+        )
+        return profile, request
+
+    def test_review_converts_structured_output_to_artifact_review(self) -> None:
+        envelope = json.dumps(
+            {
+                "structured_output": {
+                    "verdict": "revise",
+                    "confidence": 0.7,
+                    "summary": "needs a concrete opening",
+                    "issues": [
+                        {
+                            "severity": "high",
+                            "reason": "abstract opening",
+                            "suggestion": "add a failure story",
+                            "violated_rule_id": "rule-abc123",
+                        }
+                    ],
+                    "revision_instruction": "open with a concrete failure case",
+                    "learned_signals": ["checked preference rule: rule-abc123"],
+                }
+            }
+        )
+        engine = LLMReviewEngine(runner=lambda command: _fake_completed_process(envelope))
+        profile, request = self._profile_and_request()
+
+        review = engine.review(request, profile, ())
+
+        self.assertEqual(review.verdict, "revise")
+        self.assertEqual(review.confidence, 0.7)
+        self.assertEqual(review.engine, "llm:claude")
+        self.assertEqual(len(review.issues), 1)
+        self.assertEqual(review.issues[0].violated_rule_id, "rule-abc123")
+
+    def test_review_labels_engine_with_model_when_set(self) -> None:
+        envelope = json.dumps(
+            {"structured_output": {"verdict": "accept", "confidence": 0.9, "summary": "fine", "issues": []}}
+        )
+        engine = LLMReviewEngine(model="claude-opus-4-8", runner=lambda command: _fake_completed_process(envelope))
+        profile, request = self._profile_and_request()
+
+        review = engine.review(request, profile, ())
+
+        self.assertEqual(review.engine, "llm:claude-opus-4-8")
+
+    def test_review_raises_when_structured_output_missing(self) -> None:
+        envelope = json.dumps({"result": "just plain text, no structured_output field"})
+        engine = LLMReviewEngine(runner=lambda command: _fake_completed_process(envelope))
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "structured_output"):
+            engine.review(request, profile, ())
+
+    def test_review_raises_on_non_zero_exit(self) -> None:
+        engine = LLMReviewEngine(
+            runner=lambda command: _fake_completed_process("", returncode=1, stderr="auth error")
+        )
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "auth error"):
+            engine.review(request, profile, ())
+
+    def test_review_raises_on_malformed_json(self) -> None:
+        engine = LLMReviewEngine(runner=lambda command: _fake_completed_process("not json"))
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "valid JSON"):
+            engine.review(request, profile, ())
+
+    def test_review_raises_on_timeout(self) -> None:
+        def timeout_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd=command, timeout=1)
+
+        engine = LLMReviewEngine(timeout=1, runner=timeout_runner)
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "timed out"):
+            engine.review(request, profile, ())
+
+    def test_review_raises_when_claude_binary_missing_from_path(self) -> None:
+        engine = LLMReviewEngine()
+        profile, request = self._profile_and_request()
+
+        with mock.patch("decision_agent.engines.llm.shutil.which", return_value=None):
+            with self.assertRaisesRegex(LLMEngineError, "not found on PATH"):
+                engine.review(request, profile, ())
+
+    def test_prompt_construction_is_deterministic(self) -> None:
+        rule = PreferenceRule.from_value({"text": "prefer concrete examples", "status": "active"})
+        negative = PatternEntry.from_value(
+            {"text": "avoid generic conclusions", "status": "active"}, kind="negative_pattern"
+        )
+        profile = DecisionProfile(
+            user_id="u1", criteria={}, preference_rules=(rule,), negative_patterns=(negative,)
+        )
+        request = ArtifactReviewRequest(
+            task_type="blog_outline",
+            intent="write about Decision Agent",
+            artifact="draft",
+            context={"audience": "developers", "goal": "explain the loop"},
+        )
+        captured: list[str] = []
+
+        def capturing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            captured.append(command[2])
+            return _fake_completed_process(
+                json.dumps(
+                    {"structured_output": {"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []}}
+                )
+            )
+
+        engine = LLMReviewEngine(runner=capturing_runner)
+        engine.review(request, profile, ())
+        engine.review(request, profile, ())
+
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[0], captured[1])
+
+    def test_review_invokes_claude_with_expected_argv_shape(self) -> None:
+        captured: list[list[str]] = []
+
+        def capturing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            captured.append(command)
+            return _fake_completed_process(
+                json.dumps(
+                    {"structured_output": {"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []}}
+                )
+            )
+
+        profile, request = self._profile_and_request()
+        LLMReviewEngine(runner=capturing_runner).review(request, profile, ())
+
+        self.assertEqual(len(captured), 1)
+        command = captured[0]
+        self.assertEqual(command[0], "claude")
+        self.assertEqual(command[1], "-p")
+        self.assertIn("--output-format", command)
+        self.assertEqual(command[command.index("--output-format") + 1], "json")
+        self.assertIn("--json-schema", command)
+        schema_arg = command[command.index("--json-schema") + 1]
+        self.assertEqual(json.loads(schema_arg), REVIEW_JSON_SCHEMA)
+        self.assertNotIn("--model", command)
+
+    def test_review_appends_model_flag_only_when_set(self) -> None:
+        captured: list[list[str]] = []
+
+        def capturing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            captured.append(command)
+            return _fake_completed_process(
+                json.dumps(
+                    {"structured_output": {"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []}}
+                )
+            )
+
+        profile, request = self._profile_and_request()
+        LLMReviewEngine(model="claude-opus-4-8", runner=capturing_runner).review(request, profile, ())
+
+        command = captured[0]
+        self.assertIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-4-8")
+
+    def test_review_wraps_os_error_from_runner(self) -> None:
+        def failing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            raise OSError("Argument list too long")
+
+        engine = LLMReviewEngine(runner=failing_runner)
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "failed to invoke claude CLI"):
+            engine.review(request, profile, ())
 
 
 if __name__ == "__main__":
