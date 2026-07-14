@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-import shutil
-import subprocess
+import os
+import time
 from typing import Any, Callable, cast
+import urllib.error
+import urllib.request
 
 from decision_agent.engines.heuristic import relevant_records_for
 from decision_agent.models import (
@@ -18,10 +20,18 @@ from decision_agent.models import (
     SUPPORTED_VERDICTS,
 )
 
-CLAUDE_BINARY = "claude"
-DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_GATEWAY_URL = "http://127.0.0.1:8787"
+DEFAULT_TIMEOUT_SECONDS = 120.0
+DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 HISTORY_LIMIT = 5
 
+# The gateway marks tasks that were queued/pending across a restart as failed
+# with this message; surface it as its own actionable error.
+GATEWAY_RESTART_ERROR = "Task did not complete before Gateway startup"
+
+# Strict-mode structured output (as enforced by the OpenAI API behind the
+# codex provider) requires additionalProperties: false and every property
+# listed in required, on every object in the schema.
 REVIEW_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -38,13 +48,15 @@ REVIEW_JSON_SCHEMA: dict[str, Any] = {
                     "suggestion": {"type": "string"},
                     "violated_rule_id": {"type": "string"},
                 },
-                "required": ["severity", "reason", "suggestion"],
+                "required": ["severity", "reason", "suggestion", "violated_rule_id"],
+                "additionalProperties": False,
             },
         },
         "revision_instruction": {"type": "string"},
         "learned_signals": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["verdict", "confidence", "summary", "issues", "revision_instruction"],
+    "required": ["verdict", "confidence", "summary", "issues", "revision_instruction", "learned_signals"],
+    "additionalProperties": False,
 }
 
 JUDGE_INSTRUCTIONS = """\
@@ -73,16 +85,21 @@ be described in learned_signals instead.
 the profile evidence, not how well-written the artifact is in general.
 """
 
+HttpCall = Callable[[str, str, dict[str, Any] | None], tuple[int, dict[str, Any]]]
+
 
 class LLMReviewEngine:
-    """ReviewEngine backed by the local `claude` CLI, not the anthropic SDK.
+    """ReviewEngine backed by local-agent-gateway over HTTP.
 
-    Shells out to `claude -p ... --output-format json --json-schema <schema>`
-    so review requests transparently use whatever local Claude Code auth is
-    already configured (subscription or API key) -- no new pip dependency,
-    no separate credential management. Multi-vendor support (other CLIs) is
-    a deliberate non-goal here until an equivalent schema-forcing flag is
-    confirmed for another provider.
+    All LLM queries go through the always-on gateway (auth, policy, audit,
+    and provider selection live there), per the project decision that
+    Decision Agent's responsibility is judgment modeling, not LLM transport.
+    Uses only the Python standard library (urllib), preserving this
+    project's zero-pip-dependency property. Reviews run as read-only gateway
+    tasks with an outputSchema, and the schema-conforming structuredOutput
+    is converted into the domain ArtifactReview. There is deliberately no
+    fallback to the heuristic engine on failure: a caller that requested
+    --engine llm asked for that engine's judgment specifically.
     """
 
     name = "llm"
@@ -90,14 +107,25 @@ class LLMReviewEngine:
     def __init__(
         self,
         *,
-        model: str | None = None,
-        timeout: int = DEFAULT_TIMEOUT_SECONDS,
-        runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+        base_url: str | None = None,
+        token: str | None = None,
+        workspace: str | None = None,
+        repo: str | None = None,
+        provider: str | None = None,
+        timeout: float | None = None,
+        poll_interval: float | None = None,
+        http: HttpCall | None = None,
     ) -> None:
-        self.model = model
-        self.timeout = timeout
-        self._uses_real_subprocess = runner is None
-        self._runner = runner or self._run_subprocess
+        self.base_url = (base_url or os.environ.get("DECISION_AGENT_GATEWAY_URL", DEFAULT_GATEWAY_URL)).rstrip("/")
+        self.token = token or os.environ.get("DECISION_AGENT_GATEWAY_TOKEN", "")
+        self.workspace = workspace or os.environ.get("DECISION_AGENT_GATEWAY_WORKSPACE", "")
+        self.repo = repo or os.environ.get("DECISION_AGENT_GATEWAY_REPO", "")
+        self.provider = provider or os.environ.get("DECISION_AGENT_GATEWAY_PROVIDER", "")
+        self.timeout = timeout if timeout is not None else float(
+            os.environ.get("DECISION_AGENT_GATEWAY_TIMEOUT", DEFAULT_TIMEOUT_SECONDS)
+        )
+        self.poll_interval = poll_interval if poll_interval is not None else DEFAULT_POLL_INTERVAL_SECONDS
+        self._http = http or self._urllib_http
 
     def review(
         self,
@@ -105,84 +133,135 @@ class LLMReviewEngine:
         profile: DecisionProfile,
         records: tuple[DecisionRecord, ...],
     ) -> ArtifactReview:
-        if self._uses_real_subprocess and shutil.which(CLAUDE_BINARY) is None:
-            raise LLMEngineError(
-                "the `claude` CLI was not found on PATH. Install Claude Code "
-                "(https://claude.com/claude-code) and make sure `claude` is "
-                "authenticated before using --engine llm."
-            )
+        self._require_config()
 
         relevant_records = relevant_records_for(request, records)[:HISTORY_LIMIT]
         prompt = _build_prompt(request, profile, relevant_records)
 
-        command = [CLAUDE_BINARY, "-p", prompt, "--output-format", "json", "--json-schema", json.dumps(REVIEW_JSON_SCHEMA)]
-        if self.model:
-            command.extend(["--model", self.model])
+        body: dict[str, Any] = {
+            "prompt": prompt,
+            "mode": "read-only",
+            "outputSchema": REVIEW_JSON_SCHEMA,
+        }
+        if self.workspace:
+            body["workspaceId"] = self.workspace
+        else:
+            body["repo"] = self.repo
+        if self.provider:
+            body["provider"] = self.provider
 
-        try:
-            completed = self._runner(command)
-        except subprocess.TimeoutExpired as error:
-            raise LLMEngineError(f"claude CLI timed out after {self.timeout}s") from error
-        except FileNotFoundError as error:
-            raise LLMEngineError("the `claude` CLI was not found on PATH") from error
-        except OSError as error:
-            # e.g. E2BIG if the rendered prompt + schema exceed the OS argv
-            # size limit for a very large profile -- wrap rather than let an
-            # OSError escape review() uncaught.
-            raise LLMEngineError(f"failed to invoke claude CLI: {error}") from error
+        status, created = self._request("POST", "/v1/tasks", body)
+        if status != 202:
+            raise LLMEngineError(_gateway_error_message("task creation", status, created))
+        task_id = created.get("taskId")
+        if not isinstance(task_id, str) or not task_id:
+            raise LLMEngineError("gateway task creation response had no taskId")
 
-        if completed.returncode != 0:
-            raise LLMEngineError(f"claude CLI exited with status {completed.returncode}: {completed.stderr.strip()}")
+        task = self._poll_until_terminal(task_id)
+        if task.get("status") == "failed":
+            error_text = str(task.get("error") or "unknown error")
+            if GATEWAY_RESTART_ERROR in error_text:
+                raise LLMEngineError(
+                    "the gateway restarted while this review task was queued; "
+                    "re-run the review once the gateway is back up"
+                )
+            raise LLMEngineError(f"gateway review task failed: {error_text}")
 
-        try:
-            envelope = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            raise LLMEngineError(f"claude CLI did not return valid JSON: {error}") from error
-
-        structured_output = _extract_structured_output(envelope)
-        if structured_output is None:
+        structured_output = task.get("structuredOutput")
+        if not isinstance(structured_output, dict):
             raise LLMEngineError(
-                "claude CLI response had no structured_output field; the "
-                "CLI version may not support --json-schema, or the schema "
-                "was rejected"
+                "gateway task completed without structuredOutput; the gateway "
+                "version may predate outputSchema support"
             )
 
-        engine_label = f"llm:{self.model}" if self.model else "llm:claude"
+        provider_label = str(task.get("provider") or "unknown")
         try:
-            review = ArtifactReview.from_dict(structured_output)
+            review = ArtifactReview.from_dict(cast("dict[str, Any]", structured_output))
         except (KeyError, TypeError, ValueError) as error:
-            raise LLMEngineError(f"claude CLI's structured_output did not match the expected shape: {error}") from error
-        return replace(review, confidence=max(0.0, min(1.0, review.confidence)), engine=engine_label)
-
-    def _run_subprocess(self, command: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=self.timeout,
-            stdin=subprocess.DEVNULL,
+            raise LLMEngineError(f"gateway structuredOutput did not match the expected shape: {error}") from error
+        return replace(
+            review,
+            confidence=max(0.0, min(1.0, review.confidence)),
+            engine=f"llm:gateway:{provider_label}",
         )
 
+    def _require_config(self) -> None:
+        if not self.token:
+            raise LLMEngineError(
+                "DECISION_AGENT_GATEWAY_TOKEN is not set. Create a gateway API "
+                "token with scopes task:create, task:read, mode:read-only, and "
+                "the workspace:<id>/repo:<id> scopes for your review workspace, "
+                "then export it before using --engine llm."
+            )
+        if bool(self.workspace) == bool(self.repo):
+            raise LLMEngineError(
+                "set exactly one of DECISION_AGENT_GATEWAY_WORKSPACE or "
+                "DECISION_AGENT_GATEWAY_REPO to choose the gateway target for "
+                "review tasks"
+            )
 
-def _extract_structured_output(envelope: object) -> dict[str, Any] | None:
-    if not isinstance(envelope, dict):
-        return None
-    typed = cast("dict[Any, Any]", envelope)
-    value = typed.get("structured_output")
-    if not isinstance(value, dict):
-        return None
-    return {str(key): item for key, item in cast("dict[Any, Any]", value).items()}
+    def _poll_until_terminal(self, task_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + self.timeout
+        while True:
+            status, task = self._request("GET", f"/v1/tasks/{task_id}", None)
+            if status != 200:
+                raise LLMEngineError(_gateway_error_message("task polling", status, task))
+            if task.get("status") in ("completed", "failed"):
+                return task
+            if time.monotonic() >= deadline:
+                raise LLMEngineError(
+                    f"gateway review task {task_id} did not finish within "
+                    f"{self.timeout:.0f}s (last status: {task.get('status')!r}); "
+                    "it may be queued behind other tasks"
+                )
+            time.sleep(self.poll_interval)
+
+    def _request(self, method: str, path: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+        try:
+            return self._http(method, f"{self.base_url}{path}", body)
+        except urllib.error.URLError as error:
+            raise LLMEngineError(
+                f"gateway is unreachable at {self.base_url} ({error.reason}); "
+                "make sure local-agent-gateway is running"
+            ) from error
+
+    def _urllib_http(self, method: str, url: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(url, data=data, method=method)
+        request.add_header("Authorization", f"Bearer {self.token}")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=min(self.timeout, 30.0)) as response:
+                return response.status, _parse_json_body(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, _parse_json_body(error.read())
 
 
 class LLMEngineError(RuntimeError):
-    """Raised when the LLM review engine cannot produce a review.
+    """Raised when the LLM review engine cannot produce a review."""
 
-    Per the project's existing design principle, an LLM failure must not
-    silently fall back to the heuristic engine -- a caller that requested
-    --engine llm asked for that engine's judgment specifically, and silently
-    substituting a different engine's output would change the character of
-    the review without saying so.
-    """
+
+def _parse_json_body(raw: bytes) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return cast("dict[str, Any]", parsed) if isinstance(parsed, dict) else {}
+
+
+def _gateway_error_message(operation: str, status: int, body: dict[str, Any]) -> str:
+    error = body.get("error")
+    detail = ""
+    if isinstance(error, dict):
+        typed = cast("dict[str, Any]", error)
+        code = typed.get("code")
+        message = typed.get("message")
+        detail = f" {code}: {message}" if code else f" {message}"
+    hint = ""
+    if status in (401, 403):
+        hint = " (check DECISION_AGENT_GATEWAY_TOKEN and its scopes)"
+    return f"gateway {operation} failed with HTTP {status}{detail}{hint}"
 
 
 def _build_prompt(

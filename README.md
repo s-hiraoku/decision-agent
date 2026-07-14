@@ -45,31 +45,48 @@ PYTHONPATH=src python -m decision_agent.cli review \
   --engine heuristic
 ```
 
-The `llm` engine uses the local `claude` CLI (Claude Code) as a subprocess --
-not the `anthropic` Python package. This means it transparently uses whatever
-local Claude Code authentication is already configured (a Pro/Max
-subscription login or an API key), and requires no new pip dependency:
+The `llm` engine delegates every LLM query to
+[local-agent-gateway](https://github.com/s-hiraoku/local-agent-gateway), an
+always-on local HTTP API that owns auth, policy, audit, and provider
+selection (Codex today; other agents behind the same provider registry
+later). Decision Agent talks to it with the Python standard library only,
+so it stays zero-pip-dependency. Reviews run as read-only gateway tasks
+with a JSON Schema (`outputSchema`), and the schema-conforming
+`structuredOutput` becomes the review:
 
 ```bash
+export DECISION_AGENT_GATEWAY_URL=http://127.0.0.1:8787   # default
+export DECISION_AGENT_GATEWAY_TOKEN=codexgw_live_...
+export DECISION_AGENT_GATEWAY_REPO=reviews                # or DECISION_AGENT_GATEWAY_WORKSPACE
+
 PYTHONPATH=src python -m decision_agent.cli review \
   examples/review-profile.json \
   examples/review-request.json \
-  --engine llm \
-  --model claude-opus-4-8
+  --engine llm
 ```
 
-`--engine llm` requires Claude Code (`claude`) installed and authenticated
-locally; Decision Agent does not manage credentials itself. `--model` is
-passed straight through to the `claude` CLI's `--model` flag. `DECISION_AGENT_ENGINE`
-sets the default engine as an environment variable (the `--engine` flag takes
-precedence). If the LLM review fails for any reason (missing binary,
-auth error, malformed response), the command exits with an error rather than
-silently falling back to the heuristic engine -- a caller that asked for
-`--engine llm` asked for that engine's judgment specifically.
+Gateway setup for reviews:
 
-Support for other vendors' CLIs (Codex, Copilot, etc.) is a deliberate
-non-goal for now, pending confirmation that they offer an equivalent
-schema-forcing structured-output flag.
+- register a scratch directory as a `read-only` repo (e.g. `"id": "reviews"`)
+  in the gateway's `CODEXGW_ALLOWED_REPOS_JSON` -- review tasks are pure
+  text and never touch the filesystem, but the gateway requires a target
+- issue a token with scopes `task:create`, `task:read`, `mode:read-only`,
+  and `repo:reviews` (plus `workspace:<id>` if targeting a workspace)
+- optional: `DECISION_AGENT_GATEWAY_PROVIDER` passes a provider id through
+  to the gateway; `DECISION_AGENT_GATEWAY_TIMEOUT` (seconds, default 120)
+  bounds the poll loop
+- operational tip: point the gateway's `CODEX_APP_SERVER_COMMAND` at an
+  absolute `codex` binary path (Node version managers can shadow it with a
+  broken npm wrapper), and consider a wrapper that appends
+  `-c 'mcp_servers={}'` -- review tasks need no MCP servers, and skipping
+  them removes ~30s of startup timeout per configured server on every task
+
+If the LLM review fails for any reason (gateway down, auth/scope rejection,
+task failure, timeout, missing structured output), the command exits with a
+distinct error rather than silently falling back to the heuristic engine --
+a caller that asked for `--engine llm` asked for that engine's judgment
+specifically. Provider and model selection are gateway-side concerns, so
+Decision Agent needs no changes when new providers are added there.
 
 List profile rules and patterns:
 

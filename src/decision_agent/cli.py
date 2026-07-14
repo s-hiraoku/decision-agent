@@ -228,15 +228,16 @@ def _add_engine_arguments(command_parser: argparse.ArgumentParser) -> None:
     command_parser.add_argument(
         "--engine",
         choices=("heuristic", "llm"),
-        help="Review engine to use. Defaults to DECISION_AGENT_ENGINE or heuristic.",
+        help="Review engine to use. Defaults to DECISION_AGENT_ENGINE or heuristic. "
+        "The llm engine delegates to local-agent-gateway; provider and model "
+        "selection are gateway-side concerns.",
     )
-    command_parser.add_argument("--model", help="LLM model name. Reserved for the llm engine.")
 
 
 def _agent(profile: DecisionProfile, args: argparse.Namespace, parser: argparse.ArgumentParser) -> DecisionAgent:
     engine = _engine_name(args, parser)
     if engine == "llm":
-        review_engine: ReviewEngine = LLMReviewEngine(model=args.model)
+        review_engine: ReviewEngine = LLMReviewEngine()
     else:
         review_engine = HeuristicReviewEngine()
     return DecisionAgent(
@@ -250,8 +251,6 @@ def _engine_name(args: argparse.Namespace, parser: argparse.ArgumentParser) -> s
     engine = args.engine or os.environ.get("DECISION_AGENT_ENGINE", "heuristic")
     if engine not in SUPPORTED_ENGINES:
         parser.error(f"unsupported engine: {engine!r} (supported: {', '.join(sorted(SUPPORTED_ENGINES))})")
-    if args.model and engine == "heuristic":
-        parser.error("--model is only valid with --engine llm")
     return engine
 
 

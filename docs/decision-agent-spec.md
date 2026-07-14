@@ -504,18 +504,21 @@ Still incomplete:
 
 - orchestration around generator agents before the review step
 - LLM-backed review over richer natural-language criteria -- **resolved**:
-  `--engine llm` shells out to the local `claude` CLI (Claude Code) with
-  `--json-schema`, converting its `structured_output` into the domain
-  `ArtifactReview`. This is a deliberate departure from
-  `docs/detailed-design.md`'s §5 design (which sketched a direct
-  `anthropic` Python SDK integration with prompt caching): the CLI-subprocess
-  approach was chosen instead so the engine transparently uses whatever
-  local Claude Code auth is already configured (subscription or API key)
-  with zero new pip dependencies. `docs/detailed-design.md`'s §5 SDK-based
-  design was not built and should be read as superseded by this approach,
-  not as the current plan. Multi-vendor support (other CLIs such as Codex
-  or Copilot) is an explicit non-goal for now, pending confirmation that
-  those CLIs offer an equivalent schema-forcing structured-output flag
+  `--engine llm` delegates every LLM query to local-agent-gateway (the
+  user's always-on local HTTP gateway wrapping Codex App Server), sending
+  the review prompt as a read-only task with an `outputSchema` and
+  converting the returned `structuredOutput` into the domain
+  `ArtifactReview` -- verified end-to-end against a live gateway + codex.
+  This supersedes two earlier designs, both deliberately abandoned:
+  `docs/detailed-design.md`'s §5 (direct `anthropic` Python SDK with prompt
+  caching -- never built) and a short-lived claude-CLI-subprocess engine
+  (built, shipped, then replaced within days once the gateway direction was
+  settled; nothing was in production use). The governing decision:
+  Decision Agent's responsibility is judgment modeling, not LLM transport --
+  auth, policy, audit, provider and model selection all live in the
+  gateway's provider registry, so Decision Agent needs no changes when
+  providers are added there. The engine uses only the Python standard
+  library (urllib), preserving the zero-pip-dependency property
 - stronger extraction of durable preference rules from free-form feedback
 - stronger semantic matching for evaluation beyond heuristic text similarity
 - deeper optimization for user-aligned judgment, not only numeric scoring

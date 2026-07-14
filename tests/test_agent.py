@@ -1,10 +1,10 @@
 import json
-import subprocess
 import unittest
+import urllib.error
+from typing import Any
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from tempfile import TemporaryDirectory
-from unittest import mock
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.cli import main as cli_main
@@ -1146,8 +1146,40 @@ class DecisionAgentTest(unittest.TestCase):
         self.assertEqual(migrated_profile.decision_records, ())
 
 
-def _fake_completed_process(stdout: str, returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=["claude"], returncode=returncode, stdout=stdout, stderr=stderr)
+class FakeGateway:
+    """Minimal fake for the gateway HTTP contract used by LLMReviewEngine."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
+        self.create_status = 202
+        self.create_body: dict[str, Any] = {"taskId": "task_test"}
+        self.poll_responses: list[tuple[int, dict[str, Any]]] = [
+            (200, {"status": "completed", "provider": "codex", "structuredOutput": None})
+        ]
+
+    def __call__(self, method: str, url: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+        self.calls.append((method, url, body))
+        if method == "POST":
+            return self.create_status, self.create_body
+        response = self.poll_responses.pop(0) if len(self.poll_responses) > 1 else self.poll_responses[0]
+        return response
+
+
+def _completed_task(structured_output: dict[str, Any] | None, provider: str = "codex") -> tuple[int, dict[str, Any]]:
+    return (200, {"status": "completed", "provider": provider, "structuredOutput": structured_output, "error": None})
+
+
+def _gateway_engine(gateway: FakeGateway, **overrides: Any) -> LLMReviewEngine:
+    kwargs: dict[str, Any] = {
+        "base_url": "http://gateway.test",
+        "token": "test-token",
+        "workspace": "reviews",
+        "timeout": 5.0,
+        "poll_interval": 0.0,
+        "http": gateway,
+    }
+    kwargs.update(overrides)
+    return LLMReviewEngine(**kwargs)
 
 
 class LLMReviewEngineTest(unittest.TestCase):
@@ -1161,9 +1193,10 @@ class LLMReviewEngineTest(unittest.TestCase):
         return profile, request
 
     def test_review_converts_structured_output_to_artifact_review(self) -> None:
-        envelope = json.dumps(
-            {
-                "structured_output": {
+        gateway = FakeGateway()
+        gateway.poll_responses = [
+            _completed_task(
+                {
                     "verdict": "revise",
                     "confidence": 0.7,
                     "summary": "needs a concrete opening",
@@ -1178,71 +1211,138 @@ class LLMReviewEngineTest(unittest.TestCase):
                     "revision_instruction": "open with a concrete failure case",
                     "learned_signals": ["checked preference rule: rule-abc123"],
                 }
-            }
-        )
-        engine = LLMReviewEngine(runner=lambda command: _fake_completed_process(envelope))
+            )
+        ]
+        engine = _gateway_engine(gateway)
         profile, request = self._profile_and_request()
 
         review = engine.review(request, profile, ())
 
         self.assertEqual(review.verdict, "revise")
         self.assertEqual(review.confidence, 0.7)
-        self.assertEqual(review.engine, "llm:claude")
+        self.assertEqual(review.engine, "llm:gateway:codex")
         self.assertEqual(len(review.issues), 1)
         self.assertEqual(review.issues[0].violated_rule_id, "rule-abc123")
 
-    def test_review_labels_engine_with_model_when_set(self) -> None:
-        envelope = json.dumps(
-            {"structured_output": {"verdict": "accept", "confidence": 0.9, "summary": "fine", "issues": []}}
-        )
-        engine = LLMReviewEngine(model="claude-opus-4-8", runner=lambda command: _fake_completed_process(envelope))
+    def test_review_sends_expected_task_creation_body(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
+        engine = _gateway_engine(gateway, provider="codex")
+        profile, request = self._profile_and_request()
+
+        engine.review(request, profile, ())
+
+        method, url, body = gateway.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "http://gateway.test/v1/tasks")
+        assert body is not None
+        self.assertEqual(body["workspaceId"], "reviews")
+        self.assertEqual(body["mode"], "read-only")
+        self.assertEqual(body["provider"], "codex")
+        self.assertEqual(body["outputSchema"], REVIEW_JSON_SCHEMA)
+        self.assertNotIn("repo", body)
+
+    def test_review_targets_repo_when_workspace_not_set(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
+        engine = _gateway_engine(gateway, workspace="", repo="scratch-repo")
+        profile, request = self._profile_and_request()
+
+        engine.review(request, profile, ())
+
+        _, _, body = gateway.calls[0]
+        assert body is not None
+        self.assertEqual(body["repo"], "scratch-repo")
+        self.assertNotIn("workspaceId", body)
+
+    def test_review_polls_until_completed(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [
+            (200, {"status": "pending", "provider": "codex"}),
+            (200, {"status": "pending", "provider": "codex"}),
+            _completed_task({"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []}),
+        ]
+        engine = _gateway_engine(gateway)
         profile, request = self._profile_and_request()
 
         review = engine.review(request, profile, ())
 
-        self.assertEqual(review.engine, "llm:claude-opus-4-8")
+        self.assertEqual(review.verdict, "accept")
+        polls = [call for call in gateway.calls if call[0] == "GET"]
+        self.assertEqual(len(polls), 3)
+
+    def test_review_raises_on_failed_task_with_error_text(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [(200, {"status": "failed", "provider": "codex", "error": "auth exploded"})]
+        engine = _gateway_engine(gateway)
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "auth exploded"):
+            engine.review(request, profile, ())
+
+    def test_review_raises_distinct_error_for_gateway_restart(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [
+            (200, {"status": "failed", "provider": "codex", "error": "Task did not complete before Gateway startup"})
+        ]
+        engine = _gateway_engine(gateway)
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "gateway restarted"):
+            engine.review(request, profile, ())
+
+    def test_review_raises_on_timeout_while_pending(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [(200, {"status": "pending", "provider": "codex"})]
+        engine = _gateway_engine(gateway, timeout=0.05)
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "did not finish within"):
+            engine.review(request, profile, ())
 
     def test_review_raises_when_structured_output_missing(self) -> None:
-        envelope = json.dumps({"result": "just plain text, no structured_output field"})
-        engine = LLMReviewEngine(runner=lambda command: _fake_completed_process(envelope))
+        gateway = FakeGateway()
+        gateway.poll_responses = [_completed_task(None)]
+        engine = _gateway_engine(gateway)
         profile, request = self._profile_and_request()
 
-        with self.assertRaisesRegex(LLMEngineError, "structured_output"):
+        with self.assertRaisesRegex(LLMEngineError, "structuredOutput"):
             engine.review(request, profile, ())
 
-    def test_review_raises_on_non_zero_exit(self) -> None:
-        engine = LLMReviewEngine(
-            runner=lambda command: _fake_completed_process("", returncode=1, stderr="auth error")
-        )
+    def test_review_raises_on_auth_rejection_with_scope_hint(self) -> None:
+        gateway = FakeGateway()
+        gateway.create_status = 403
+        gateway.create_body = {"error": {"code": "FORBIDDEN", "message": "Forbidden"}}
+        engine = _gateway_engine(gateway)
         profile, request = self._profile_and_request()
 
-        with self.assertRaisesRegex(LLMEngineError, "auth error"):
+        with self.assertRaisesRegex(LLMEngineError, "DECISION_AGENT_GATEWAY_TOKEN"):
             engine.review(request, profile, ())
 
-    def test_review_raises_on_malformed_json(self) -> None:
-        engine = LLMReviewEngine(runner=lambda command: _fake_completed_process("not json"))
+    def test_review_requires_token_configuration(self) -> None:
+        engine = _gateway_engine(FakeGateway(), token="")
         profile, request = self._profile_and_request()
 
-        with self.assertRaisesRegex(LLMEngineError, "valid JSON"):
+        with self.assertRaisesRegex(LLMEngineError, "DECISION_AGENT_GATEWAY_TOKEN is not set"):
             engine.review(request, profile, ())
 
-    def test_review_raises_on_timeout(self) -> None:
-        def timeout_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
-            raise subprocess.TimeoutExpired(cmd=command, timeout=1)
-
-        engine = LLMReviewEngine(timeout=1, runner=timeout_runner)
+    def test_review_requires_exactly_one_target(self) -> None:
         profile, request = self._profile_and_request()
 
-        with self.assertRaisesRegex(LLMEngineError, "timed out"):
-            engine.review(request, profile, ())
-
-    def test_review_raises_when_claude_binary_missing_from_path(self) -> None:
-        engine = LLMReviewEngine()
-        profile, request = self._profile_and_request()
-
-        with mock.patch("decision_agent.engines.llm.shutil.which", return_value=None):
-            with self.assertRaisesRegex(LLMEngineError, "not found on PATH"):
+        for overrides in ({"workspace": "", "repo": ""}, {"workspace": "reviews", "repo": "scratch"}):
+            engine = _gateway_engine(FakeGateway(), **overrides)
+            with self.assertRaisesRegex(LLMEngineError, "exactly one of"):
                 engine.review(request, profile, ())
+
+    def test_review_raises_when_gateway_unreachable(self) -> None:
+        def unreachable(method: str, url: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+            raise urllib.error.URLError("connection refused")
+
+        engine = _gateway_engine(FakeGateway(), http=unreachable)
+        profile, request = self._profile_and_request()
+
+        with self.assertRaisesRegex(LLMEngineError, "unreachable"):
+            engine.review(request, profile, ())
 
     def test_prompt_construction_is_deterministic(self) -> None:
         rule = PreferenceRule.from_value({"text": "prefer concrete examples", "status": "active"})
@@ -1258,75 +1358,16 @@ class LLMReviewEngineTest(unittest.TestCase):
             artifact="draft",
             context={"audience": "developers", "goal": "explain the loop"},
         )
-        captured: list[str] = []
+        gateway = FakeGateway()
+        gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []})]
+        engine = _gateway_engine(gateway)
 
-        def capturing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
-            captured.append(command[2])
-            return _fake_completed_process(
-                json.dumps(
-                    {"structured_output": {"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []}}
-                )
-            )
-
-        engine = LLMReviewEngine(runner=capturing_runner)
         engine.review(request, profile, ())
         engine.review(request, profile, ())
 
-        self.assertEqual(len(captured), 2)
-        self.assertEqual(captured[0], captured[1])
-
-    def test_review_invokes_claude_with_expected_argv_shape(self) -> None:
-        captured: list[list[str]] = []
-
-        def capturing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
-            captured.append(command)
-            return _fake_completed_process(
-                json.dumps(
-                    {"structured_output": {"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []}}
-                )
-            )
-
-        profile, request = self._profile_and_request()
-        LLMReviewEngine(runner=capturing_runner).review(request, profile, ())
-
-        self.assertEqual(len(captured), 1)
-        command = captured[0]
-        self.assertEqual(command[0], "claude")
-        self.assertEqual(command[1], "-p")
-        self.assertIn("--output-format", command)
-        self.assertEqual(command[command.index("--output-format") + 1], "json")
-        self.assertIn("--json-schema", command)
-        schema_arg = command[command.index("--json-schema") + 1]
-        self.assertEqual(json.loads(schema_arg), REVIEW_JSON_SCHEMA)
-        self.assertNotIn("--model", command)
-
-    def test_review_appends_model_flag_only_when_set(self) -> None:
-        captured: list[list[str]] = []
-
-        def capturing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
-            captured.append(command)
-            return _fake_completed_process(
-                json.dumps(
-                    {"structured_output": {"verdict": "accept", "confidence": 0.5, "summary": "s", "issues": []}}
-                )
-            )
-
-        profile, request = self._profile_and_request()
-        LLMReviewEngine(model="claude-opus-4-8", runner=capturing_runner).review(request, profile, ())
-
-        command = captured[0]
-        self.assertIn("--model", command)
-        self.assertEqual(command[command.index("--model") + 1], "claude-opus-4-8")
-
-    def test_review_wraps_os_error_from_runner(self) -> None:
-        def failing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
-            raise OSError("Argument list too long")
-
-        engine = LLMReviewEngine(runner=failing_runner)
-        profile, request = self._profile_and_request()
-
-        with self.assertRaisesRegex(LLMEngineError, "failed to invoke claude CLI"):
-            engine.review(request, profile, ())
+        prompts = [call[2]["prompt"] for call in gateway.calls if call[0] == "POST" and call[2] is not None]
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(prompts[0], prompts[1])
 
 
 if __name__ == "__main__":

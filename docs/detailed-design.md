@@ -346,11 +346,15 @@ class DecisionProfile:
 ## 5. LLMReviewEngine の設計
 
 **この節は実装されていない。実際の `LLMReviewEngine` は、本節が前提とする
-`anthropic` Python SDK 直接呼び出しではなく、ローカルの `claude` CLI
-(Claude Code) を `--json-schema` 付きサブプロセスとして呼び出す方式で実装された
-(`src/decision_agent/engines/llm.py`)。これは、ユーザーのローカル Claude Code
-認証(サブスクリプションまたは API キー)をそのまま透過的に使い、新規 pip 依存を
-増やさないための意図的な選択である。以降の §5.1〜§5.5 は当初案の記録として残すが、
+`anthropic` Python SDK 直接呼び出しではなく、常時起動の local-agent-gateway
+(Codex App Server をラップするローカル HTTP API) への委譲として実装された
+(`src/decision_agent/engines/llm.py`)。レビューは `outputSchema` 付きの
+read-only タスクとして gateway に送られ、返ってきた `structuredOutput` を
+ドメインの `ArtifactReview` に変換する。認証・ポリシー・監査・プロバイダ選択は
+すべて gateway 側の責務であり、Decision Agent は判断モデリングに専念する、
+という責務分離が根拠。標準ライブラリ(urllib)のみを使い pip 依存ゼロを維持する。
+(経緯: 本節の SDK 案 → claude CLI サブプロセス案(短期間実装) → gateway 委譲、
+の順に置き換えられた。) 以降の §5.1〜§5.5 は当初案の記録として残すが、
 現状のコードとは一致しない。詳細は `decision-agent-spec.md` の
 "Still incomplete"(LLM-backed review, resolved の注記)を参照。**
 
