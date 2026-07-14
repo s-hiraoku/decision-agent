@@ -1150,15 +1150,21 @@ class FakeGateway:
     """Minimal fake for the gateway HTTP contract used by LLMReviewEngine."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
+        self.calls: list[tuple[str, str, dict[str, Any] | None, dict[str, str] | None]] = []
         self.create_status = 202
-        self.create_body: dict[str, Any] = {"taskId": "task_test"}
+        self.create_body: dict[str, Any] = {"jobId": "job_test"}
         self.poll_responses: list[tuple[int, dict[str, Any]]] = [
             (200, {"status": "completed", "provider": "codex", "structuredOutput": None})
         ]
 
-    def __call__(self, method: str, url: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
-        self.calls.append((method, url, body))
+    def __call__(
+        self,
+        method: str,
+        url: str,
+        body: dict[str, Any] | None,
+        headers: dict[str, str] | None,
+    ) -> tuple[int, dict[str, Any]]:
+        self.calls.append((method, url, body, headers))
         if method == "POST":
             return self.create_status, self.create_body
         response = self.poll_responses.pop(0) if len(self.poll_responses) > 1 else self.poll_responses[0]
@@ -1173,7 +1179,7 @@ def _gateway_engine(gateway: FakeGateway, **overrides: Any) -> LLMReviewEngine:
     kwargs: dict[str, Any] = {
         "base_url": "http://gateway.test",
         "token": "test-token",
-        "workspace": "reviews",
+        "repo": "reviews",
         "timeout": 5.0,
         "poll_interval": 0.0,
         "http": gateway,
@@ -1227,33 +1233,31 @@ class LLMReviewEngineTest(unittest.TestCase):
     def test_review_sends_expected_task_creation_body(self) -> None:
         gateway = FakeGateway()
         gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
-        engine = _gateway_engine(gateway, provider="codex")
+        engine = _gateway_engine(gateway)
         profile, request = self._profile_and_request()
 
         engine.review(request, profile, ())
 
-        method, url, body = gateway.calls[0]
+        method, url, body, headers = gateway.calls[0]
         self.assertEqual(method, "POST")
-        self.assertEqual(url, "http://gateway.test/v1/tasks")
+        self.assertEqual(url, "http://gateway.test/v2/coding/runs")
         assert body is not None
-        self.assertEqual(body["workspaceId"], "reviews")
-        self.assertEqual(body["mode"], "read-only")
-        self.assertEqual(body["provider"], "codex")
+        self.assertEqual(body["repositoryId"], "reviews")
         self.assertEqual(body["outputSchema"], REVIEW_JSON_SCHEMA)
-        self.assertNotIn("repo", body)
+        assert headers is not None
+        self.assertTrue(headers["Idempotency-Key"].startswith("decision-review-"))
 
-    def test_review_targets_repo_when_workspace_not_set(self) -> None:
+    def test_review_targets_configured_repo(self) -> None:
         gateway = FakeGateway()
         gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
-        engine = _gateway_engine(gateway, workspace="", repo="scratch-repo")
+        engine = _gateway_engine(gateway, repo="scratch-repo")
         profile, request = self._profile_and_request()
 
         engine.review(request, profile, ())
 
-        _, _, body = gateway.calls[0]
+        _, _, body, _ = gateway.calls[0]
         assert body is not None
-        self.assertEqual(body["repo"], "scratch-repo")
-        self.assertNotIn("workspaceId", body)
+        self.assertEqual(body["repositoryId"], "scratch-repo")
 
     def test_review_polls_until_completed(self) -> None:
         gateway = FakeGateway()
@@ -1273,22 +1277,13 @@ class LLMReviewEngineTest(unittest.TestCase):
 
     def test_review_raises_on_failed_task_with_error_text(self) -> None:
         gateway = FakeGateway()
-        gateway.poll_responses = [(200, {"status": "failed", "provider": "codex", "error": "auth exploded"})]
-        engine = _gateway_engine(gateway)
-        profile, request = self._profile_and_request()
-
-        with self.assertRaisesRegex(LLMEngineError, "auth exploded"):
-            engine.review(request, profile, ())
-
-    def test_review_raises_distinct_error_for_gateway_restart(self) -> None:
-        gateway = FakeGateway()
         gateway.poll_responses = [
-            (200, {"status": "failed", "provider": "codex", "error": "Task did not complete before Gateway startup"})
+            (200, {"status": "failed", "error": {"code": "CODEX_EXECUTION_FAILED", "message": "auth exploded"}})
         ]
         engine = _gateway_engine(gateway)
         profile, request = self._profile_and_request()
 
-        with self.assertRaisesRegex(LLMEngineError, "gateway restarted"):
+        with self.assertRaisesRegex(LLMEngineError, "auth exploded"):
             engine.review(request, profile, ())
 
     def test_review_raises_on_timeout_while_pending(self) -> None:
@@ -1299,6 +1294,7 @@ class LLMReviewEngineTest(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMEngineError, "did not finish within"):
             engine.review(request, profile, ())
+        self.assertTrue(any(call[0] == "POST" and call[1].endswith("/cancel") for call in gateway.calls))
 
     def test_review_raises_when_structured_output_missing(self) -> None:
         gateway = FakeGateway()
@@ -1326,16 +1322,23 @@ class LLMReviewEngineTest(unittest.TestCase):
         with self.assertRaisesRegex(LLMEngineError, "DECISION_AGENT_GATEWAY_TOKEN is not set"):
             engine.review(request, profile, ())
 
-    def test_review_requires_exactly_one_target(self) -> None:
+    def test_review_requires_repo(self) -> None:
         profile, request = self._profile_and_request()
-
-        for overrides in ({"workspace": "", "repo": ""}, {"workspace": "reviews", "repo": "scratch"}):
-            engine = _gateway_engine(FakeGateway(), **overrides)
-            with self.assertRaisesRegex(LLMEngineError, "exactly one of"):
-                engine.review(request, profile, ())
+        engine = _gateway_engine(FakeGateway(), repo="")
+        with self.assertRaisesRegex(LLMEngineError, "DECISION_AGENT_GATEWAY_REPO is not set"):
+            engine.review(request, profile, ())
 
     def test_review_raises_when_gateway_unreachable(self) -> None:
-        def unreachable(method: str, url: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+        attempts = 0
+
+        def unreachable(
+            method: str,
+            url: str,
+            body: dict[str, Any] | None,
+            headers: dict[str, str] | None,
+        ) -> tuple[int, dict[str, Any]]:
+            nonlocal attempts
+            attempts += 1
             raise urllib.error.URLError("connection refused")
 
         engine = _gateway_engine(FakeGateway(), http=unreachable)
@@ -1343,6 +1346,35 @@ class LLMReviewEngineTest(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMEngineError, "unreachable"):
             engine.review(request, profile, ())
+        self.assertEqual(attempts, 3)
+
+    def test_review_retries_creation_with_the_same_idempotency_key(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [
+            _completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})
+        ]
+        creation_attempts = 0
+
+        def flaky(
+            method: str,
+            url: str,
+            body: dict[str, Any] | None,
+            headers: dict[str, str] | None,
+        ) -> tuple[int, dict[str, Any]]:
+            nonlocal creation_attempts
+            if method == "POST" and url.endswith("/v2/coding/runs"):
+                creation_attempts += 1
+                if creation_attempts == 1:
+                    gateway.calls.append((method, url, body, headers))
+                    raise urllib.error.URLError("response lost")
+            return gateway(method, url, body, headers)
+
+        engine = _gateway_engine(gateway, http=flaky)
+        profile, request = self._profile_and_request()
+        self.assertEqual(engine.review(request, profile, ()).verdict, "accept")
+        creates = [call for call in gateway.calls if call[1].endswith("/v2/coding/runs")]
+        self.assertEqual(len(creates), 2)
+        self.assertEqual(creates[0][3], creates[1][3])
 
     def test_prompt_construction_is_deterministic(self) -> None:
         rule = PreferenceRule.from_value({"text": "prefer concrete examples", "status": "active"})

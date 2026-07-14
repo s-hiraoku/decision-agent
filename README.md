@@ -50,14 +50,14 @@ The `llm` engine delegates every LLM query to
 always-on local HTTP API that owns auth, policy, audit, and provider
 selection (Codex today; other agents behind the same provider registry
 later). Decision Agent talks to it with the Python standard library only,
-so it stays zero-pip-dependency. Reviews run as read-only gateway tasks
+so it stays zero-pip-dependency. Reviews run as read-only Gateway V2 jobs
 with a JSON Schema (`outputSchema`), and the schema-conforming
 `structuredOutput` becomes the review:
 
 ```bash
 export DECISION_AGENT_GATEWAY_URL=http://127.0.0.1:8787   # default
-export DECISION_AGENT_GATEWAY_TOKEN=codexgw_live_...
-export DECISION_AGENT_GATEWAY_REPO=reviews                # or DECISION_AGENT_GATEWAY_WORKSPACE
+export DECISION_AGENT_GATEWAY_TOKEN='a-long-random-owner-token'
+export DECISION_AGENT_GATEWAY_REPO=reviews
 
 PYTHONPATH=src python -m decision_agent.cli review \
   examples/review-profile.json \
@@ -67,19 +67,20 @@ PYTHONPATH=src python -m decision_agent.cli review \
 
 Gateway setup for reviews:
 
-- register a scratch directory as a `read-only` repo (e.g. `"id": "reviews"`)
-  in the gateway's `CODEXGW_ALLOWED_REPOS_JSON` -- review tasks are pure
+- register a scratch directory as a repo (e.g. `"id": "reviews"`)
+  in the gateway's `CODEXGW_REPOSITORIES_JSON` -- review jobs are pure
   text and never touch the filesystem, but the gateway requires a target
-- issue a token with scopes `task:create`, `task:read`, `mode:read-only`,
-  and `repo:reviews` (plus `workspace:<id>` if targeting a workspace)
-- optional: `DECISION_AGENT_GATEWAY_PROVIDER` passes a provider id through
-  to the gateway; `DECISION_AGENT_GATEWAY_TIMEOUT` (seconds, default 120)
-  bounds the poll loop
-- operational tip: point the gateway's `CODEX_APP_SERVER_COMMAND` at an
-  absolute `codex` binary path (Node version managers can shadow it with a
-  broken npm wrapper), and consider a wrapper that appends
-  `-c 'mcp_servers={}'` -- review tasks need no MCP servers, and skipping
-  them removes ~30s of startup timeout per configured server on every task
+- use the Gateway's single-owner bearer token; Decision-Agent never receives
+  ChatGPT or OpenAI Platform credentials
+- `DECISION_AGENT_GATEWAY_TIMEOUT` (seconds, default 120) bounds polling;
+  Decision-Agent requests cancellation when that deadline expires
+- authenticate the Gateway's dedicated `CODEX_HOME` with `codex login` and
+  confirm `GET /readyz` succeeds before running reviews
+
+Decision-Agent submits `POST /v2/coding/runs`; the Gateway atomically creates
+the internal conversation and durable job. It passes the review schema to
+Codex App Server and validates the exact final JSON again before exposing
+`structuredOutput`. Provider and model remain Gateway-side policy.
 
 If the LLM review fails for any reason (gateway down, auth/scope rejection,
 task failure, timeout, missing structured output), the command exits with a

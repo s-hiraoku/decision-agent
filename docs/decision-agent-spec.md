@@ -506,9 +506,10 @@ Still incomplete:
 - LLM-backed review over richer natural-language criteria -- **resolved**:
   `--engine llm` delegates every LLM query to local-agent-gateway (the
   user's always-on local HTTP gateway wrapping Codex App Server), sending
-  the review prompt as a read-only task with an `outputSchema` and
+  the review prompt as an atomic read-only V2 coding run with an `outputSchema` and
   converting the returned `structuredOutput` into the domain
-  `ArtifactReview` -- verified end-to-end against a live gateway + codex.
+  `ArtifactReview` -- covered by the Gateway V2 HTTP and App Server protocol
+  integration tests; deployment still requires a dedicated ChatGPT login.
   This supersedes two earlier designs, both deliberately abandoned:
   `docs/detailed-design.md`'s §5 (direct `anthropic` Python SDK with prompt
   caching -- never built) and a short-lived claude-CLI-subprocess engine
