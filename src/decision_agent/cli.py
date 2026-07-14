@@ -125,10 +125,10 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "learn":
         # learn() only records a pre-computed review + feedback; it never
-        # calls a ReviewEngine. --engine/--model are validated here (so a
-        # typo'd flag still errors) but intentionally not passed to _agent(),
-        # which would construct an engine (and, for --engine llm, spawn a
-        # claude subprocess) that this command never uses.
+        # calls a ReviewEngine. --engine is validated here (so a typo'd
+        # value still errors) but intentionally not passed to _agent(),
+        # which would construct an engine (and, for --engine llm, hit the
+        # gateway) that this command never uses.
         _engine_name(args, parser)
         profile = load_profile(args.profile)
         request = load_review_request(args.request)
