@@ -349,7 +349,7 @@ class DecisionProfile:
 `anthropic` Python SDK 直接呼び出しではなく、常時起動の local-agent-gateway
 (Codex App Server をラップするローカル HTTP API) への委譲として実装された
 (`src/decision_agent/engines/llm.py`)。レビューは `outputSchema` 付きの
-read-only タスクとして gateway に送られ、返ってきた `structuredOutput` を
+Gateway V2 one-shot coding run として送られ、返ってきた `structuredOutput` を
 ドメインの `ArtifactReview` に変換する。認証・ポリシー・監査・プロバイダ選択は
 すべて gateway 側の責務であり、Decision Agent は判断モデリングに専念する、
 という責務分離が根拠。標準ライブラリ(urllib)のみを使い pip 依存ゼロを維持する。

@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable, cast
 import urllib.error
 import urllib.request
+import uuid
 
 from decision_agent.engines.heuristic import relevant_records_for
 from decision_agent.models import (
@@ -24,10 +25,6 @@ DEFAULT_GATEWAY_URL = "http://127.0.0.1:8787"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 HISTORY_LIMIT = 5
-
-# The gateway marks tasks that were queued/pending across a restart as failed
-# with this message; surface it as its own actionable error.
-GATEWAY_RESTART_ERROR = "Task did not complete before Gateway startup"
 
 # Strict-mode structured output (as enforced by the OpenAI API behind the
 # codex provider) requires additionalProperties: false and every property
@@ -85,7 +82,7 @@ be described in learned_signals instead.
 the profile evidence, not how well-written the artifact is in general.
 """
 
-HttpCall = Callable[[str, str, dict[str, Any] | None], tuple[int, dict[str, Any]]]
+HttpCall = Callable[[str, str, dict[str, Any] | None, dict[str, str] | None], tuple[int, dict[str, Any]]]
 
 
 class LLMReviewEngine:
@@ -96,7 +93,7 @@ class LLMReviewEngine:
     Decision Agent's responsibility is judgment modeling, not LLM transport.
     Uses only the Python standard library (urllib), preserving this
     project's zero-pip-dependency property. Reviews run as read-only gateway
-    tasks with an outputSchema, and the schema-conforming structuredOutput
+    jobs with an outputSchema, and the schema-conforming structuredOutput
     is converted into the domain ArtifactReview. There is deliberately no
     fallback to the heuristic engine on failure: a caller that requested
     --engine llm asked for that engine's judgment specifically.
@@ -109,18 +106,14 @@ class LLMReviewEngine:
         *,
         base_url: str | None = None,
         token: str | None = None,
-        workspace: str | None = None,
         repo: str | None = None,
-        provider: str | None = None,
         timeout: float | None = None,
         poll_interval: float | None = None,
         http: HttpCall | None = None,
     ) -> None:
         self.base_url = (base_url or os.environ.get("DECISION_AGENT_GATEWAY_URL", DEFAULT_GATEWAY_URL)).rstrip("/")
         self.token = token or os.environ.get("DECISION_AGENT_GATEWAY_TOKEN", "")
-        self.workspace = workspace or os.environ.get("DECISION_AGENT_GATEWAY_WORKSPACE", "")
         self.repo = repo or os.environ.get("DECISION_AGENT_GATEWAY_REPO", "")
-        self.provider = provider or os.environ.get("DECISION_AGENT_GATEWAY_PROVIDER", "")
         self.timeout = timeout if timeout is not None else float(
             os.environ.get("DECISION_AGENT_GATEWAY_TIMEOUT", DEFAULT_TIMEOUT_SECONDS)
         )
@@ -139,42 +132,39 @@ class LLMReviewEngine:
         prompt = _build_prompt(request, profile, relevant_records)
 
         body: dict[str, Any] = {
+            "repositoryId": self.repo,
             "prompt": prompt,
-            "mode": "read-only",
             "outputSchema": REVIEW_JSON_SCHEMA,
         }
-        if self.workspace:
-            body["workspaceId"] = self.workspace
-        else:
-            body["repo"] = self.repo
-        if self.provider:
-            body["provider"] = self.provider
-
-        status, created = self._request("POST", "/v1/tasks", body)
+        status, created = self._request(
+            "POST",
+            "/v2/coding/runs",
+            body,
+            {"Idempotency-Key": f"decision-review-{uuid.uuid4()}"},
+        )
         if status != 202:
-            raise LLMEngineError(_gateway_error_message("task creation", status, created))
-        task_id = created.get("taskId")
-        if not isinstance(task_id, str) or not task_id:
-            raise LLMEngineError("gateway task creation response had no taskId")
+            raise LLMEngineError(_gateway_error_message("job creation", status, created))
+        job_id = created.get("jobId")
+        if not isinstance(job_id, str) or not job_id:
+            raise LLMEngineError("gateway job creation response had no jobId")
 
-        task = self._poll_until_terminal(task_id)
-        if task.get("status") == "failed":
-            error_text = str(task.get("error") or "unknown error")
-            if GATEWAY_RESTART_ERROR in error_text:
-                raise LLMEngineError(
-                    "the gateway restarted while this review task was queued; "
-                    "re-run the review once the gateway is back up"
-                )
-            raise LLMEngineError(f"gateway review task failed: {error_text}")
+        task = self._poll_until_terminal(job_id)
+        if task.get("status") != "completed":
+            error = task.get("error")
+            if isinstance(error, dict):
+                typed_error = cast("dict[str, Any]", error)
+                code = str(typed_error.get("code") or "unknown")
+                message = str(typed_error.get("message") or "unknown error")
+                raise LLMEngineError(f"gateway review job failed ({code}): {message}")
+            raise LLMEngineError(f"gateway review job ended with status {task.get('status')!r}")
 
         structured_output = task.get("structuredOutput")
         if not isinstance(structured_output, dict):
             raise LLMEngineError(
-                "gateway task completed without structuredOutput; the gateway "
-                "version may predate outputSchema support"
+                "gateway job completed without structuredOutput; Gateway V2 "
+                "structured output support is required"
             )
 
-        provider_label = str(task.get("provider") or "unknown")
         try:
             review = ArtifactReview.from_dict(cast("dict[str, Any]", structured_output))
         except (KeyError, TypeError, ValueError) as error:
@@ -182,53 +172,77 @@ class LLMReviewEngine:
         return replace(
             review,
             confidence=max(0.0, min(1.0, review.confidence)),
-            engine=f"llm:gateway:{provider_label}",
+            engine="llm:gateway:codex",
         )
 
     def _require_config(self) -> None:
         if not self.token:
             raise LLMEngineError(
                 "DECISION_AGENT_GATEWAY_TOKEN is not set. Create a gateway API "
-                "token with scopes task:create, task:read, mode:read-only, and "
-                "the workspace:<id>/repo:<id> scopes for your review workspace, "
-                "then export it before using --engine llm."
+                "owner token, then export it before using --engine llm."
             )
-        if bool(self.workspace) == bool(self.repo):
+        if not self.repo:
             raise LLMEngineError(
-                "set exactly one of DECISION_AGENT_GATEWAY_WORKSPACE or "
-                "DECISION_AGENT_GATEWAY_REPO to choose the gateway target for "
-                "review tasks"
+                "DECISION_AGENT_GATEWAY_REPO is not set. Configure the public "
+                "repository id registered by local-agent-gateway."
             )
 
-    def _poll_until_terminal(self, task_id: str) -> dict[str, Any]:
+    def _poll_until_terminal(self, job_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout
+        interval = self.poll_interval
         while True:
-            status, task = self._request("GET", f"/v1/tasks/{task_id}", None)
+            status, task = self._request("GET", f"/v2/jobs/{job_id}", None)
             if status != 200:
-                raise LLMEngineError(_gateway_error_message("task polling", status, task))
-            if task.get("status") in ("completed", "failed"):
+                raise LLMEngineError(_gateway_error_message("job polling", status, task))
+            if task.get("status") in ("completed", "failed", "cancelled"):
                 return task
             if time.monotonic() >= deadline:
+                try:
+                    self._request("POST", f"/v2/jobs/{job_id}/cancel", None)
+                except LLMEngineError:
+                    pass
                 raise LLMEngineError(
-                    f"gateway review task {task_id} did not finish within "
+                    f"gateway review job {job_id} did not finish within "
                     f"{self.timeout:.0f}s (last status: {task.get('status')!r}); "
-                    "it may be queued behind other tasks"
+                    "cancellation was requested"
                 )
-            time.sleep(self.poll_interval)
+            time.sleep(interval)
+            if interval > 0:
+                interval = min(5.0, interval * 1.5)
 
-    def _request(self, method: str, path: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
-        try:
-            return self._http(method, f"{self.base_url}{path}", body)
-        except urllib.error.URLError as error:
-            raise LLMEngineError(
-                f"gateway is unreachable at {self.base_url} ({error.reason}); "
-                "make sure local-agent-gateway is running"
-            ) from error
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        last_error: urllib.error.URLError | None = None
+        for attempt in range(3):
+            try:
+                return self._http(method, f"{self.base_url}{path}", body, headers)
+            except urllib.error.URLError as error:
+                last_error = error
+                if attempt < 2:
+                    time.sleep(min(0.5, self.poll_interval))
+        assert last_error is not None
+        raise LLMEngineError(
+            f"gateway is unreachable at {self.base_url} ({last_error.reason}); "
+            "make sure local-agent-gateway is running"
+        ) from last_error
 
-    def _urllib_http(self, method: str, url: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+    def _urllib_http(
+        self,
+        method: str,
+        url: str,
+        body: dict[str, Any] | None,
+        headers: dict[str, str] | None,
+    ) -> tuple[int, dict[str, Any]]:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, method=method)
         request.add_header("Authorization", f"Bearer {self.token}")
+        for name, value in (headers or {}).items():
+            request.add_header(name, value)
         if data is not None:
             request.add_header("Content-Type", "application/json")
         try:
