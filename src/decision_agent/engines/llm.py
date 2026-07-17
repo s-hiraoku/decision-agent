@@ -131,14 +131,27 @@ class LLMReviewEngine:
         relevant_records = relevant_records_for(request, records)[:HISTORY_LIMIT]
         prompt = _build_prompt(request, profile, relevant_records)
 
-        body: dict[str, Any] = {
-            "repositoryId": self.repo,
-            "prompt": prompt,
-            "outputSchema": REVIEW_JSON_SCHEMA,
-        }
+        # A review is pure text-in/JSON-out and never inspects a repository, so
+        # it runs as a gateway inference job by default -- no repository needs
+        # to be registered. If DECISION_AGENT_GATEWAY_REPO is set (e.g. pointing
+        # at an older gateway without the inference endpoint), fall back to a
+        # read-only coding run against that repo.
+        if self.repo:
+            endpoint = "/v2/coding/runs"
+            body: dict[str, Any] = {
+                "repositoryId": self.repo,
+                "prompt": prompt,
+                "outputSchema": REVIEW_JSON_SCHEMA,
+            }
+        else:
+            endpoint = "/v2/inference/runs"
+            body = {
+                "prompt": prompt,
+                "outputSchema": REVIEW_JSON_SCHEMA,
+            }
         status, created = self._request(
             "POST",
-            "/v2/coding/runs",
+            endpoint,
             body,
             {"Idempotency-Key": f"decision-review-{uuid.uuid4()}"},
         )
@@ -181,11 +194,9 @@ class LLMReviewEngine:
                 "DECISION_AGENT_GATEWAY_TOKEN is not set. Create a gateway API "
                 "owner token, then export it before using --engine llm."
             )
-        if not self.repo:
-            raise LLMEngineError(
-                "DECISION_AGENT_GATEWAY_REPO is not set. Configure the public "
-                "repository id registered by local-agent-gateway."
-            )
+        # DECISION_AGENT_GATEWAY_REPO is optional: reviews run as gateway
+        # inference jobs by default and need no repository. Setting it opts
+        # into the coding-run path against that repo.
 
     def _poll_until_terminal(self, job_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout

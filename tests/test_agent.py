@@ -1179,7 +1179,7 @@ def _gateway_engine(gateway: FakeGateway, **overrides: Any) -> LLMReviewEngine:
     kwargs: dict[str, Any] = {
         "base_url": "http://gateway.test",
         "token": "test-token",
-        "repo": "reviews",
+        "repo": "",
         "timeout": 5.0,
         "poll_interval": 0.0,
         "http": gateway,
@@ -1230,7 +1230,7 @@ class LLMReviewEngineTest(unittest.TestCase):
         self.assertEqual(len(review.issues), 1)
         self.assertEqual(review.issues[0].violated_rule_id, "rule-abc123")
 
-    def test_review_sends_expected_task_creation_body(self) -> None:
+    def test_review_defaults_to_inference_with_no_repository(self) -> None:
         gateway = FakeGateway()
         gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
         engine = _gateway_engine(gateway)
@@ -1240,14 +1240,14 @@ class LLMReviewEngineTest(unittest.TestCase):
 
         method, url, body, headers = gateway.calls[0]
         self.assertEqual(method, "POST")
-        self.assertEqual(url, "http://gateway.test/v2/coding/runs")
+        self.assertEqual(url, "http://gateway.test/v2/inference/runs")
         assert body is not None
-        self.assertEqual(body["repositoryId"], "reviews")
+        self.assertNotIn("repositoryId", body)
         self.assertEqual(body["outputSchema"], REVIEW_JSON_SCHEMA)
         assert headers is not None
         self.assertTrue(headers["Idempotency-Key"].startswith("decision-review-"))
 
-    def test_review_targets_configured_repo(self) -> None:
+    def test_review_targets_configured_repo_via_coding_run(self) -> None:
         gateway = FakeGateway()
         gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
         engine = _gateway_engine(gateway, repo="scratch-repo")
@@ -1255,7 +1255,8 @@ class LLMReviewEngineTest(unittest.TestCase):
 
         engine.review(request, profile, ())
 
-        _, _, body, _ = gateway.calls[0]
+        _, url, body, _ = gateway.calls[0]
+        self.assertEqual(url, "http://gateway.test/v2/coding/runs")
         assert body is not None
         self.assertEqual(body["repositoryId"], "scratch-repo")
 
@@ -1322,11 +1323,16 @@ class LLMReviewEngineTest(unittest.TestCase):
         with self.assertRaisesRegex(LLMEngineError, "DECISION_AGENT_GATEWAY_TOKEN is not set"):
             engine.review(request, profile, ())
 
-    def test_review_requires_repo(self) -> None:
+    def test_review_does_not_require_repo(self) -> None:
+        gateway = FakeGateway()
+        gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
+        engine = _gateway_engine(gateway, repo="")
         profile, request = self._profile_and_request()
-        engine = _gateway_engine(FakeGateway(), repo="")
-        with self.assertRaisesRegex(LLMEngineError, "DECISION_AGENT_GATEWAY_REPO is not set"):
-            engine.review(request, profile, ())
+
+        # No DECISION_AGENT_GATEWAY_REPO: the review still runs, via inference.
+        review = engine.review(request, profile, ())
+        self.assertEqual(review.verdict, "accept")
+        self.assertTrue(gateway.calls[0][1].endswith("/v2/inference/runs"))
 
     def test_review_raises_when_gateway_unreachable(self) -> None:
         attempts = 0
@@ -1362,7 +1368,7 @@ class LLMReviewEngineTest(unittest.TestCase):
             headers: dict[str, str] | None,
         ) -> tuple[int, dict[str, Any]]:
             nonlocal creation_attempts
-            if method == "POST" and url.endswith("/v2/coding/runs"):
+            if method == "POST" and url.endswith("/v2/inference/runs"):
                 creation_attempts += 1
                 if creation_attempts == 1:
                     gateway.calls.append((method, url, body, headers))
@@ -1372,7 +1378,7 @@ class LLMReviewEngineTest(unittest.TestCase):
         engine = _gateway_engine(gateway, http=flaky)
         profile, request = self._profile_and_request()
         self.assertEqual(engine.review(request, profile, ()).verdict, "accept")
-        creates = [call for call in gateway.calls if call[1].endswith("/v2/coding/runs")]
+        creates = [call for call in gateway.calls if call[1].endswith("/v2/inference/runs")]
         self.assertEqual(len(creates), 2)
         self.assertEqual(creates[0][3], creates[1][3])
 
