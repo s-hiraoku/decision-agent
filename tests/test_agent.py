@@ -5,6 +5,7 @@ from typing import Any
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from decision_agent.agent import DecisionAgent
 from decision_agent.cli import main as cli_main
@@ -1233,7 +1234,8 @@ class LLMReviewEngineTest(unittest.TestCase):
     def test_review_defaults_to_inference_with_no_repository(self) -> None:
         gateway = FakeGateway()
         gateway.poll_responses = [_completed_task({"verdict": "accept", "confidence": 0.9, "summary": "s", "issues": []})]
-        engine = _gateway_engine(gateway)
+        with patch.dict("os.environ", {"DECISION_AGENT_GATEWAY_REPO": "legacy-repo"}):
+            engine = _gateway_engine(gateway)
         profile, request = self._profile_and_request()
 
         engine.review(request, profile, ())

@@ -113,7 +113,7 @@ class LLMReviewEngine:
     ) -> None:
         self.base_url = (base_url or os.environ.get("DECISION_AGENT_GATEWAY_URL", DEFAULT_GATEWAY_URL)).rstrip("/")
         self.token = token or os.environ.get("DECISION_AGENT_GATEWAY_TOKEN", "")
-        self.repo = repo or os.environ.get("DECISION_AGENT_GATEWAY_REPO", "")
+        self.repo = repo if repo is not None else os.environ.get("DECISION_AGENT_GATEWAY_REPO", "")
         self.timeout = timeout if timeout is not None else float(
             os.environ.get("DECISION_AGENT_GATEWAY_TIMEOUT", DEFAULT_TIMEOUT_SECONDS)
         )
