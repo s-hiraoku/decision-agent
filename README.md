@@ -64,6 +64,34 @@ PYTHONPATH=src python -m decision_agent.cli review \
   --engine llm
 ```
 
+For the Gateway's macOS LaunchAgent installation, keep the owner token in the
+login Keychain rather than a repository file. Rotate it only when provisioning
+or revoking trusted clients; rotation invalidates the previous token and
+restarts the Gateway. Capture the value without printing it:
+
+```bash
+GATEWAYCTL="$HOME/Library/Application Support/local-agent-gateway/bin/gatewayctl"
+export DECISION_AGENT_GATEWAY_URL=http://127.0.0.1:8787
+DECISION_AGENT_GATEWAY_TOKEN="$("$GATEWAYCTL" rotate-token)"
+export DECISION_AGENT_GATEWAY_TOKEN
+```
+
+The LaunchAgent already reads the same token from Keychain. Do not commit the
+exported value or copy it into an `.env` file. A source merge or checkout does
+not update the versioned release used by the running LaunchAgent; redeploy the
+Gateway before relying on a newly merged endpoint.
+
+After provisioning, a trusted client running as the same macOS user can load
+the current token in a new shell without rotating it again:
+
+```bash
+DECISION_AGENT_GATEWAY_TOKEN="$(security find-generic-password \
+  -a "$USER" \
+  -s com.s-hiraoku.local-agent-gateway.api-token \
+  -w)"
+export DECISION_AGENT_GATEWAY_TOKEN
+```
+
 Gateway setup for reviews:
 
 - no repository needs to be registered: a review is pure text-in/JSON-out and
@@ -75,6 +103,8 @@ Gateway setup for reviews:
   Decision-Agent requests cancellation when that deadline expires
 - authenticate the Gateway's dedicated `CODEX_HOME` with `codex login` and
   confirm `GET /readyz` succeeds before running reviews
+- after deploying a new Gateway release, confirm both readiness and one
+  authenticated inference job before treating the integration as ready
 
 Decision-Agent submits `POST /v2/inference/runs`; the Gateway atomically
 creates the internal conversation and durable job. It passes the review schema
