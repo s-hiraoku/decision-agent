@@ -57,7 +57,6 @@ with a JSON Schema (`outputSchema`), and the schema-conforming
 ```bash
 export DECISION_AGENT_GATEWAY_URL=http://127.0.0.1:8787   # default
 export DECISION_AGENT_GATEWAY_TOKEN='a-long-random-owner-token'
-export DECISION_AGENT_GATEWAY_REPO=reviews
 
 PYTHONPATH=src python -m decision_agent.cli review \
   examples/review-profile.json \
@@ -67,9 +66,9 @@ PYTHONPATH=src python -m decision_agent.cli review \
 
 Gateway setup for reviews:
 
-- register a scratch directory as a repo (e.g. `"id": "reviews"`)
-  in the gateway's `CODEXGW_REPOSITORIES_JSON` -- review jobs are pure
-  text and never touch the filesystem, but the gateway requires a target
+- no repository needs to be registered: a review is pure text-in/JSON-out and
+  runs as a Gateway inference job against a private working directory the
+  client never names
 - use the Gateway's single-owner bearer token; Decision-Agent never receives
   ChatGPT or OpenAI Platform credentials
 - `DECISION_AGENT_GATEWAY_TIMEOUT` (seconds, default 120) bounds polling;
@@ -77,10 +76,14 @@ Gateway setup for reviews:
 - authenticate the Gateway's dedicated `CODEX_HOME` with `codex login` and
   confirm `GET /readyz` succeeds before running reviews
 
-Decision-Agent submits `POST /v2/coding/runs`; the Gateway atomically creates
-the internal conversation and durable job. It passes the review schema to
-Codex App Server and validates the exact final JSON again before exposing
+Decision-Agent submits `POST /v2/inference/runs`; the Gateway atomically
+creates the internal conversation and durable job. It passes the review schema
+to Codex App Server and validates the exact final JSON again before exposing
 `structuredOutput`. Provider and model remain Gateway-side policy.
+
+`DECISION_AGENT_GATEWAY_REPO` is optional: set it to fall back to a read-only
+`POST /v2/coding/runs` against that registered repo (for an older Gateway that
+predates the inference endpoint).
 
 If the LLM review fails for any reason (gateway down, auth/scope rejection,
 task failure, timeout, missing structured output), the command exits with a
